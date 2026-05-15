@@ -11,75 +11,21 @@ faithfully — moving horizontally along flat segments and vertically
 along cliff transitions.
 """
 
+import math
 import numpy as np
 from collections import deque
-from dataclasses import dataclass, field
 from typing import Optional, Callable
-from occupancy_map import OccupancyMap, OccupancyMapConfig
+from occupancy_map import (
+    OccupancyMap, OccupancyMapConfig,
+    DVLConfig, SonarConfig, AltimeterConfig,
+    Pose, SensorType, DVLMeasurement, AltimeterMeasurement, SonarMeasurement,
+    ObstacleMapper,
+)
 
 # ---------------------------------------------------------------------------
 # Terrain generators
 # ---------------------------------------------------------------------------
 
-
-@dataclass
-class DVLConfig:
-    """Nortek Nucleus 1000 DVL: 1 altimeter + 3 beams at 20° slant.
-
-    Each beam entry is (slant_angle_deg, heading_offset_deg):
-      - slant_angle: angle from vertical (0° = straight down)
-      - heading_offset: angle from vehicle heading (0° = forward, 90° = starboard)
-    """
-    beams: list = field(default_factory=lambda: [
-        ( 0.0,   0.0),   # altimeter: straight down
-        (20.0,   0.0),   # beam 1: forward-down
-        (20.0, 120.0),   # beam 2: right-rear-down
-        (20.0, 240.0),   # beam 3: left-rear-down
-    ])
-    max_range: float = 20.0
-
-    @property
-    def beam_angles_rad(self) -> np.ndarray:
-        """2D projection of each beam onto the vehicle's heading plane.
-
-        Returns the effective angle from vertical (positive = forward) for use
-        by the 2D occupancy map.  A beam with slant s and heading offset h
-        projects to atan2(sin(s)*cos(h), cos(s)).
-        """
-        angles = []
-        for slant_deg, h_off_deg in self.beams:
-            s = np.radians(slant_deg)
-            h = np.radians(h_off_deg)
-            angles.append(np.arctan2(np.sin(s) * np.cos(h), np.cos(s)))
-        return np.array(angles)
-
-    @property
-    def beam_directions_3d(self) -> np.ndarray:
-        """Unit-vector components per beam in vehicle frame (fwd, starboard, down).
-
-        Returns shape (n_beams, 3).  Scale each row by range to get the
-        displacement from the vehicle to the terrain hit point.
-        """
-        dirs = []
-        for slant_deg, h_off_deg in self.beams:
-            s = np.radians(slant_deg)
-            h = np.radians(h_off_deg)
-            dirs.append((np.sin(s) * np.cos(h),   # forward component
-                         np.sin(s) * np.sin(h),   # starboard component
-                         np.cos(s)))              # downward component
-        return np.array(dirs)
-
-
-@dataclass
-class SonarConfig:
-    """Forward-looking sonar configuration."""
-    max_range: float = 12.0     # Maximum detection range (m)
-    half_angle: float = 3.0     # Half beam width (degrees)
-    noise_std: float = 0.3      # Range measurement noise std (m)
-
-    @property
-    def half_angle_rad(self) -> float:
-        return np.radians(self.half_angle)
 
 
 def default_terrain(world_x: float) -> float:
@@ -240,116 +186,119 @@ class Simulator:
     Drives the AUV simulation loop.
 
     The vehicle walks along the planned path polyline at constant arc-length
-    speed. Sensors sample the terrain to build the occupancy map.
+    speed. Sensors sample the terrain to build the occupancy map via the
+    ObstacleMapper interface.
     """
 
-    # ------------------------------------------------------------------
-    # Stuck / oscillation detection thresholds
-    # ------------------------------------------------------------------
-    # Slow-progress detection: only fires when the vehicle has been in
-    # ALT_FOLLOW for the ENTIRE window (OBSTACLE_CLEAR and ALT_CORRECTION
-    # naturally produce low forward speed during steep rises/descents).
-    # The window is wide enough to span a full vertical-descent cycle.
-    _STUCK_WINDOW_STEPS: int = 100      # steps (~10 s) over which progress is checked
-    _STUCK_PROGRESS_MIN: float = 0.3    # min forward progress (m) across full window
-    _OSCIL_WINDOW_STEPS: int = 12       # steps checked for rapid mode oscillation
-    _OSCIL_MIN_FLIPS: int = 6           # min mode flips in window to flag oscillation
-    _PERIODIC_PRINT_STEPS: int = 200    # print a one-liner heartbeat every N steps
+    _STUCK_WINDOW_STEPS: int = 100
+    _STUCK_PROGRESS_MIN: float = 0.3
+    _OSCIL_WINDOW_STEPS: int = 12
+    _OSCIL_MIN_FLIPS: int = 6
+    _PERIODIC_PRINT_STEPS: int = 200
 
     def __init__(
         self,
         omap_config: Optional[OccupancyMapConfig] = None,
         dvl_config: Optional[DVLConfig] = None,
         sonar_config: Optional[SonarConfig] = None,
+        altimeter_config: Optional[AltimeterConfig] = None,
         terrain_fn: Optional[Callable[[float], float]] = None,
         initial_depth: float = 0.0,
+        dvl_hz: float = 8.0,
+        altimeter_hz: float = 2.0,
+        sonar_hz: float = 1.0,
+        control_hz: float = 10.0,
         debug: bool = True,
     ):
-        self.omap = OccupancyMap(omap_config or OccupancyMapConfig())
         self.dvl = dvl_config or DVLConfig()
         self.sonar = sonar_config or SonarConfig()
+        self.altimeter = altimeter_config or AltimeterConfig()
+        self.mapper = ObstacleMapper(
+            omap_config or OccupancyMapConfig(),
+            self.dvl,
+            self.sonar,
+            self.altimeter,
+        )
+        self._dvl_period   = 1.0 / dvl_hz
+        self._alt_period   = 1.0 / altimeter_hz
+        self._sonar_period = 1.0 / sonar_hz
+        self._ctrl_period  = 1.0 / control_hz
+        self._dvl_last_t   = -self._dvl_period
+        self._alt_last_t   = -self._alt_period
+        self._sonar_last_t = -self._sonar_period
+        self._ctrl_last_t  = -self._ctrl_period
         self.terrain_fn = terrain_fn or default_terrain
         self.debug = debug
 
-        # Vehicle state
         self.vehicle_x: float = 0.0
         self.vehicle_z: float = initial_depth
         self.time: float = 0.0
 
-        # Initialize grid centered on vehicle
-        self.omap.reset(self.vehicle_x, self.vehicle_z)
+        # Cached control outputs — updated at control_hz, applied every dt
+        self._ctrl_vx: float = 0.0   # forward speed (m/s)
+        self._ctrl_vz: float = 0.0   # heave rate (m/s, positive = dive)
 
-        # State log for visualization
+        self.mapper.reset(Pose(north=0.0, east=0.0, depth=initial_depth, heading=0.0))
+
         self.log: list = []
 
-        # Debug / stuck-detection state
         self._step_count: int = 0
         self._x_history: deque = deque(maxlen=self._STUCK_WINDOW_STEPS)
-        # _mode_history_full covers the full stuck window so the ALT_FOLLOW
-        # check is not fooled by an ALT_CORRECTION that finished a few steps ago.
         self._mode_history_full: deque = deque(maxlen=self._STUCK_WINDOW_STEPS)
         self._mode_history: deque = deque(maxlen=self._OSCIL_WINDOW_STEPS)
-        self._last_stuck_report_x: float = -999.0  # avoid repeat reports at same x
+        self._last_stuck_report_x: float = -999.0
 
     def _simulate_dvl(self):
-        """Generate DVL observations by ray-tracing beams against terrain."""
+        """Ray-trace DVL beams against terrain; return (ranges, hit_surface)."""
         angles = self.dvl.beam_angles_rad
         ranges = np.zeros(len(angles))
         hit_surface = np.zeros(len(angles), dtype=bool)
-
         for i, ang in enumerate(angles):
-            # Ray-march until we hit terrain or exceed max range
             r = 0.1
             while r < self.dvl.max_range:
-                dx = np.sin(ang) * r
-                dz = np.cos(ang) * r
-                hit_x = self.vehicle_x + dx
-                hit_z = self.vehicle_z + dz
-                floor_z = self.terrain_fn(hit_x)
-
-                if hit_z >= floor_z:
+                hit_x = self.vehicle_x + np.sin(ang) * r
+                hit_z = self.vehicle_z + np.cos(ang) * r
+                if hit_z >= self.terrain_fn(hit_x):
                     ranges[i] = r
                     hit_surface[i] = True
                     break
                 r += 0.1
-
             if not hit_surface[i]:
                 ranges[i] = self.dvl.max_range
+        return ranges, hit_surface
 
-        return ranges, angles, hit_surface
+    def _simulate_altimeter(self):
+        """Simulate altimeter: vertical range to seafloor directly below vehicle."""
+        r = max(0.0, self.terrain_fn(self.vehicle_x) - self.vehicle_z)
+        if r >= self.altimeter.max_range:
+            return self.altimeter.max_range, False
+        return r, True
 
     def _simulate_sonar(self):
-        """Generate forward sonar observation by ray-tracing."""
-        # Cast rays across the sonar beam width
+        """Ray-trace forward sonar from vehicle nose; return (range_from_nose, hit)."""
         n_rays = 7
         angles = np.linspace(-self.sonar.half_angle_rad,
                              self.sonar.half_angle_rad, n_rays)
+        nose_x = self.vehicle_x + self.mapper.omap.cfg.vehicle_length / 2.0
         min_range = self.sonar.max_range
         hit = False
-
         for ang in angles:
             r = 0.2
             while r < self.sonar.max_range:
-                dx = r * np.cos(ang)
-                dz = r * np.sin(ang)
-                hit_x = self.vehicle_x + dx
-                hit_z = self.vehicle_z + dz
-                floor_z = self.terrain_fn(hit_x)
-
-                if hit_z >= floor_z:
-                    # Add noise
+                hit_x = nose_x + r * np.cos(ang)
+                hit_z = self.vehicle_z + r * np.sin(ang)
+                if hit_z >= self.terrain_fn(hit_x):
                     noisy_r = r + np.random.normal(0, self.sonar.noise_std)
                     if noisy_r < min_range:
                         min_range = max(0.1, noisy_r)
                     hit = True
                     break
                 r += 0.2
-
         return min_range, hit
 
     def _cmd_depth_at_x(self, world_x: float) -> float:
-        """Linearly interpolate omap.cmd_depth at world_x."""
-        omap = self.omap
+        """Linearly interpolate mapper.omap.cmd_depth at world_x."""
+        omap = self.mapper.omap
         if omap.nx < 2:
             return self.vehicle_z
         rel = (world_x - omap.grid_origin_x) / omap.cfg.dx
@@ -371,76 +320,69 @@ class Simulator:
         return float(z_low + t * (z_high - z_low))
 
     def step(self, dt: float):
+        """Advance simulation by dt seconds.
+
+        Each step: kinematics are integrated first so the vehicle pose is
+        current, then sensor callbacks fire with that accurate pose, then the
+        control loop ticks (at control_hz) and updates the cached velocity
+        commands that will drive the next steps.
+
+        Order:
+          1. Integrate kinematics → updated (x, z, t).
+          2. Build pose from updated position.
+          3. Fire sensors (DVL / altimeter / sonar) with current pose.
+          4. Control tick (10 Hz): pass pose to mapper, query altitude + command, update vx/vz cache.
         """
-        Advance simulation by dt seconds.
-
-        Motion model is mode-aware:
-        - ALT_FOLLOW: constant forward velocity (``survey_speed``); vertical
-          follows cmd_depth target, bounded by ``vertical_speed``.
-        - OBSTACLE_CLEAR / ALT_CORRECTION: vertical (no forward) when the
-          cmd_depth target differs from current depth, otherwise horizontal
-          at survey_speed (clearance-adjustment phase).
-        """
-        speed = self.omap.cfg.survey_speed
-        v_speed = self.omap.cfg.vertical_speed
-
-        # --- Sensor updates ---
-        dvl_ranges, dvl_angles, dvl_hits = self._simulate_dvl()
-        self.omap.update_dvl_ray(
-            dvl_ranges, dvl_angles,
-            self.vehicle_z, self.vehicle_x,
-            hit_surface=dvl_hits,
-        )
-
-        sonar_range, sonar_hit = self._simulate_sonar()
-        self.omap.update_sonar(
-            sonar_range, self.sonar.half_angle_rad,
-            self.vehicle_z, self.vehicle_x,
-            sonar_hit
-        )
-
-        # --- Build manifold and path ---
-        cmd_depth = self.omap.update(self.vehicle_z)
-
-        # --- Mode-aware motion ---
-        mode = self.omap.control_mode
-        max_dz = v_speed * dt
-
-        if mode == "ALT_FOLLOW":
-            forward_dx = speed * dt
-            target_z = self._cmd_depth_at_x(self.vehicle_x + forward_dx)
-            dz = target_z - self.vehicle_z
-            if abs(dz) > max_dz:
-                dz = np.sign(dz) * max_dz
-            self.vehicle_z += dz
-            self.vehicle_x += forward_dx
-            self.omap.advance(forward_dx)
-        elif mode in ("OBSTACLE_CLEAR", "ALT_CORRECTION"):
-            target_z = cmd_depth if not np.isnan(cmd_depth) else self.vehicle_z
-            dz = target_z - self.vehicle_z
-            if abs(dz) > 0.1:
-                if abs(dz) > max_dz:
-                    dz = np.sign(dz) * max_dz
-                self.vehicle_z += dz
-            else:
-                # At target — clearance-adjustment forward.
-                forward_dx = speed * dt
-                self.vehicle_x += forward_dx
-                self.omap.advance(forward_dx)
-        else:
-            self.vehicle_x += speed * dt
-            self.omap.advance(speed * dt)
-
-        # Clamp vehicle depth at the water surface — vehicle cannot fly
-        # above water.  Without this the OBSTACLE_CLEAR ascent can push
-        # vehicle_z negative.
-        if self.vehicle_z < 0.0:
-            self.vehicle_z = 0.0
-
-        self.omap.shift_depth(self.vehicle_z)
+        # 1. Integrate kinematics with current cached velocity commands
+        self.vehicle_z += self._ctrl_vz * dt
+        self.vehicle_x += self._ctrl_vx * dt
+        self.vehicle_z = max(0.0, self.vehicle_z)
         self.time += dt
 
-        # --- Log state ---
+        # 2. Pose from updated position
+        pose = Pose(north=self.vehicle_x, east=0.0, depth=self.vehicle_z, heading=0.0)
+
+        # 3. Sensor callbacks with accurate pose
+        if self.time >= self._dvl_last_t + self._dvl_period:
+            dvl_ranges, dvl_hits = self._simulate_dvl()
+            self.mapper.update_sensor(SensorType.DVL, DVLMeasurement(dvl_ranges, dvl_hits), pose)
+            self._dvl_last_t += self._dvl_period
+
+        if self.time >= self._alt_last_t + self._alt_period:
+            alt_range, alt_hit = self._simulate_altimeter()
+            self.mapper.update_sensor(SensorType.ALTIMETER, AltimeterMeasurement(alt_range, alt_hit), pose)
+            self._alt_last_t += self._alt_period
+
+        if self.time >= self._sonar_last_t + self._sonar_period:
+            sonar_range, sonar_hit = self._simulate_sonar()
+            self.mapper.update_sensor(SensorType.SONAR, SonarMeasurement(sonar_range, sonar_hit), pose)
+            self._sonar_last_t += self._sonar_period
+
+        # 4. Control tick — runs at control_hz, independent of sensor rates
+        if self.time >= self._ctrl_last_t + self._ctrl_period:
+            self.mapper.update_pose(pose)
+            ctrl_alt = self.mapper.get_altitude()
+            ctrl_cmd = self.mapper.get_control()
+            c = self.mapper.omap.cfg
+            self._ctrl_vx = ctrl_cmd.vx
+            if ctrl_cmd.vertical_mode == 'ALT_FOLLOW':
+                if not np.isnan(ctrl_alt):
+                    # Positive vz = dive; positive when alt > target (need to descend)
+                    self._ctrl_vz = float(np.clip(
+                        ctrl_alt - ctrl_cmd.vertical_target,
+                        -c.vertical_speed, c.vertical_speed,
+                    ))
+                else:
+                    self._ctrl_vz = 0.0
+            else:  # DEPTH_HOLD
+                self._ctrl_vz = float(np.clip(
+                    ctrl_cmd.vertical_target - self.vehicle_z,
+                    -c.vertical_speed, c.vertical_speed,
+                ))
+            self._ctrl_last_t += self._ctrl_period
+
+        cmd_depth = self.mapper.omap.get_commanded_depth_at_vehicle()
+
         terrain_z = self.terrain_fn(self.vehicle_x)
         altitude = terrain_z - self.vehicle_z
         state = {
@@ -453,7 +395,6 @@ class Simulator:
         }
         self.log.append(state)
 
-        # --- Debug output ---
         if self.debug:
             self._debug_check(terrain_z, altitude)
 
@@ -464,42 +405,35 @@ class Simulator:
     # ------------------------------------------------------------------
 
     def _debug_check(self, terrain_z: float, altitude: float):
-        """Check for stuck / oscillation conditions and emit diagnostics."""
         self._step_count += 1
         self._x_history.append(self.vehicle_x)
-        self._mode_history.append(self.omap.control_mode)
-        self._mode_history_full.append(self.omap.control_mode)
+        omap = self.mapper.omap
+        self._mode_history.append(omap.control_mode)
+        self._mode_history_full.append(omap.control_mode)
 
-        # --- Periodic heartbeat ---
         if self._step_count % self._PERIODIC_PRINT_STEPS == 0:
+            alt_reading = self.mapper.get_altitude()
+            alt_s = f"{alt_reading:5.2f}" if not np.isnan(alt_reading) else "  nan"
             print(
                 f"[T={self.time:7.1f}s  X={self.vehicle_x:7.1f}m  Z={self.vehicle_z:6.2f}m  "
                 f"alt={altitude:5.2f}m  terrain={terrain_z:6.2f}m  "
-                f"mode={self.omap.control_mode:<15} dvl={self.omap.dvl_altitude:5.2f}m]"
+                f"mode={omap.control_mode:<15} sensor_alt={alt_s}m]"
             )
 
-        # Only run full diagnostics when we have enough history
         if len(self._x_history) < self._STUCK_WINDOW_STEPS:
             return
 
         progress = self._x_history[-1] - self._x_history[0]
-        # Slow-progress alert only makes sense when the vehicle has been in
-        # ALT_FOLLOW for the *entire* window.  OBSTACLE_CLEAR / ALT_CORRECTION
-        # naturally produce low forward speed during steep rises/descents;
-        # even a completed descent a few steps ago should suppress the alert.
         all_alt_follow = (
             len(self._mode_history_full) == self._STUCK_WINDOW_STEPS
             and all(m == "ALT_FOLLOW" for m in self._mode_history_full)
         )
         is_stuck = all_alt_follow and progress < self._STUCK_PROGRESS_MIN
-
         flips = sum(
             1 for i in range(1, len(self._mode_history))
             if self._mode_history[i] != self._mode_history[i - 1]
         )
         is_oscillating = flips >= self._OSCIL_MIN_FLIPS
-
-        # Suppress repeat reports within 2 m of the last report
         too_close = abs(self.vehicle_x - self._last_stuck_report_x) < 2.0
 
         if (is_stuck or is_oscillating) and not too_close:
@@ -518,26 +452,16 @@ class Simulator:
                 f"X={self.vehicle_x:.3f}m  Z={self.vehicle_z:.3f}m\n"
                 f"  Reason: {'; '.join(reason)}\n"
                 f"  Terrain: {terrain_z:.3f}m  Altitude: {altitude:.3f}m  "
-                f"Target alt: {self.omap.cfg.imaging_altitude:.2f}m\n"
+                f"Target alt: {omap.cfg.imaging_altitude:.2f}m\n"
                 f"  Mode history (last {self._OSCIL_WINDOW_STEPS}): "
                 f"{' '.join(m[0] for m in self._mode_history)}\n"
-                + self.omap.get_debug_summary(self.vehicle_z) +
+                + omap.get_debug_summary(self.vehicle_z) +
                 f"\n{'='*70}"
             )
 
     def run(self, duration: float, dt: float = 0.1) -> list:
-        """
-        Run simulation for a given duration.
-
-        Args:
-            duration: Total simulation time (seconds).
-            dt: Time step (seconds).
-
-        Returns:
-            List of state dicts from each step.
-        """
-        steps = int(np.ceil(duration / dt))
-        for _ in range(steps):
+        """Run simulation for a given duration."""
+        for _ in range(int(np.ceil(duration / dt))):
             self.step(dt)
         return self.log
 
@@ -692,6 +616,160 @@ def make_terrain_3d_sawtooth(
     return fn
 
 
+def make_terrain_3d_random_reef(
+    seed: int | None = None,
+    base_depth: float = 40.5,
+    min_depth: float = 8.5,
+    max_depth: float = 98.0,
+    reef_grid_dx: float = 0.55,
+    reef_grid_xlim: tuple[float, float] | None = None,
+    reef_grid_ylim: tuple[float, float] | None = None,
+) -> Callable[[float, float], float]:
+    """Procedural reef-like bathymetry: bommies, terraces / cliff-like faults,
+    low-frequency swell, and high rugosity (local rises and falls of typically
+    2-3 m over horizontal scales of roughly 1-5 m mixed with larger structure).
+
+    Each call draws a fresh realisation unless *seed* is fixed. Typical use is
+    the ``default`` 3-D terrain preset for varied obstacle-avoidance stress.
+
+    Output depth ``z`` increases downward (positive into the water column).
+    Shallow reefs may approach *min_depth*; deep gouges clip at *max_depth*.
+
+    For simulation speed the field is **rasterised once** on a regular XY grid
+    (defaults cover lawnmower-scale missions) and evaluated at runtime via
+    bilinear interpolation.  Finer *reef_grid_dx* or wider ``reef_grid_*lim``
+    improves fidelity outside the window at some build cost.
+    """
+    rng = np.random.default_rng(seed)
+
+    x0, x1 = reef_grid_xlim if reef_grid_xlim is not None else (-52.0, 268.0)
+    y0, y1 = reef_grid_ylim if reef_grid_ylim is not None else (-125.0, 125.0)
+    dxg = max(0.12, float(reef_grid_dx))
+
+    nx = max(3, int(np.ceil((x1 - x0) / dxg)) + 1)
+    ny = max(3, int(np.ceil((y1 - y0) / dxg)) + 1)
+    xs = np.linspace(x0, x1, nx, dtype=np.float64)
+    ys = np.linspace(y0, y1, ny, dtype=np.float64)
+    xstep = float(xs[1] - xs[0]) if nx > 1 else 1.0
+    ystep = float(ys[1] - ys[0]) if ny > 1 else 1.0
+    X, Y = np.meshgrid(xs, ys, indexing='ij')
+    Z = np.full(X.shape, float(base_depth), dtype=np.float64)
+
+    # ------- Long swell (overall slope envelope) --------
+    swell_k = rng.uniform(np.pi / 220.0, np.pi / 75.0, size=(4, 2))
+    swell_a = rng.uniform(2.0, 7.5, size=4)
+    swell_p = rng.uniform(0.0, 2.0 * np.pi, size=4)
+
+    mid_k = rng.uniform(np.pi / 76.0, np.pi / 22.0, size=(7, 2))
+    mid_a = rng.uniform(1.5, 5.8, size=7)
+    mid_p = rng.uniform(0.0, 2.0 * np.pi, size=7)
+
+    # ------- Rugosity: multiple bands for reef-like texture --------
+    nk = int(rng.integers(28, 46))
+    L = rng.uniform(1.0, 6.8, size=nk)
+    ang = rng.uniform(0.0, 2.0 * np.pi, size=nk)
+    rk_kx = (2.0 * np.pi / L) * np.cos(ang)
+    rk_ky = (2.0 * np.pi / L) * np.sin(ang)
+    rk_a = rng.uniform(0.35, 2.05, size=nk) * 0.82
+    rk_p = rng.uniform(0.0, 2.0 * np.pi, size=nk)
+
+    nk2 = int(rng.integers(18, 30))
+    L2 = rng.uniform(1.05, 3.95, size=nk2)
+    ang2 = rng.uniform(0.0, 2.0 * np.pi, size=nk2)
+    rk2_kx = (2.0 * np.pi / L2) * np.cos(ang2)
+    rk2_ky = (2.0 * np.pi / L2) * np.sin(ang2)
+    rk_a2 = rng.uniform(0.27, 1.45, size=nk2) * 0.78
+    rk_p2 = rng.uniform(0.0, 2.0 * np.pi, size=nk2)
+
+    # ------- Bommies (Gaussian mounds, shallow apex) --------
+    n_bom = int(rng.integers(21, 40))
+    bx = rng.uniform(-25.0, 220.0, size=n_bom)
+    by = rng.uniform(-90.0, 90.0, size=n_bom)
+    b_wx = rng.uniform(2.2, 17.5, size=n_bom)
+    b_wy = rng.uniform(2.2, 14.8, size=n_bom)
+    b_rot = rng.uniform(0.0, np.pi, size=n_bom)
+    b_h = rng.uniform(2.0, 16.8, size=n_bom)
+
+    # ------- Inverse-Gaussian “bowls” / drop-offs behind bommies --------
+    n_hole = int(rng.integers(6, 15))
+    hx = rng.uniform(-20.0, 210.0, size=n_hole)
+    hy = rng.uniform(-75.0, 75.0, size=n_hole)
+    h_w = rng.uniform(5.6, 32.0, size=n_hole)
+    h_d = rng.uniform(2.0, 12.8, size=n_hole)
+
+    # ------- Near-sheer terrace / cliff faults across the scene --------
+    n_fault = int(rng.integers(6, 13))
+    fx0 = rng.uniform(-10.0, 190.0, size=n_fault)
+    fy0 = rng.uniform(-70.0, 70.0, size=n_fault)
+    fh = rng.uniform(0.0, np.pi * 2.0, size=n_fault)
+    f_nx = np.cos(fh)
+    f_ny = np.sin(fh)
+    f_drop = rng.uniform(3.5, 12.9, size=n_fault)
+    f_sharp = rng.uniform(22.0, 120.0, size=n_fault)
+    f_sg = rng.uniform(0.0, 3.14159, size=n_fault)
+
+    # --- Vector accumulation on grid ---
+    for i in range(4):
+        Z += swell_a[i] * np.sin(
+            swell_k[i, 0] * X + swell_k[i, 1] * Y + swell_p[i])
+    for i in range(7):
+        Z += mid_a[i] * np.sin(
+            mid_k[i, 0] * X + mid_k[i, 1] * Y + mid_p[i])
+
+    for i in range(nk):
+        Z += rk_a[i] * np.sin(
+            rk_kx[i] * X + rk_ky[i] * Y + rk_p[i])
+    for i in range(nk2):
+        Z += rk_a2[i] * np.sin(
+            rk2_kx[i] * X + rk2_ky[i] * Y + rk_p2[i])
+
+    for i in range(n_bom):
+        ct, st = float(np.cos(b_rot[i])), float(np.sin(b_rot[i]))
+        dxm = X - bx[i]
+        dym = Y - by[i]
+        xr = ct * dxm - st * dym
+        yr = st * dxm + ct * dym
+        ex = (xr ** 2 / (b_wx[i] ** 2 + 0.06)
+              + yr ** 2 / (b_wy[i] ** 2 + 0.06))
+        Z -= b_h[i] * np.exp(-0.92 * np.minimum(ex, 48.0))
+
+    for i in range(n_hole):
+        r2 = (X - hx[i]) ** 2 + (Y - hy[i]) ** 2
+        Z += h_d[i] * np.exp(-0.53 * r2 / (h_w[i] ** 2 + 0.15))
+
+    for i in range(n_fault):
+        t = ((X - fx0[i]) * f_nx[i] + (Y - fy0[i]) * f_ny[i]
+             + math.sin(float(f_sg[i])))
+        arg = np.clip(-float(f_sharp[i]) * t, -708.0, 708.0)
+        sig = 1.0 / (1.0 + np.exp(arg))
+        Z += float(f_drop[i]) * (sig - 0.5)
+
+    np.clip(Z, min_depth, max_depth, out=Z)
+
+    def terrain(x: float, y: float) -> float:
+        xc = float(np.clip(x, xs[0], xs[-1]))
+        yc = float(np.clip(y, ys[0], ys[-1]))
+        xf = (xc - xs[0]) / xstep
+        yf = (yc - ys[0]) / ystep
+        i0 = int(np.floor(xf))
+        j0 = int(np.floor(yf))
+        i0 = min(max(i0, 0), nx - 2)
+        j0 = min(max(j0, 0), ny - 2)
+        tx = min(max(float(xf - i0), 0.0), 1.0)
+        ty = min(max(float(yf - j0), 0.0), 1.0)
+        z = (
+            (1.0 - tx) * (1.0 - ty) * Z[i0, j0]
+            + tx * (1.0 - ty) * Z[i0 + 1, j0]
+            + (1.0 - tx) * ty * Z[i0, j0 + 1]
+            + tx * ty * Z[i0 + 1, j0 + 1]
+        )
+        return float(z)
+
+    terrain.__name__ = "random_reef_3d"
+    terrain._reef_grid_shape = (nx, ny)  # debug / tuning
+    return terrain
+
+
 def make_terrain_3d_default(base_depth: float = 30.0) -> Callable[[float, float], float]:
     """Default 3D test terrain: a seamount centred 40 m ahead with gentle
     background ridges (XY scale halved; vertical scale unchanged)."""
@@ -713,7 +791,8 @@ _TERRAIN_3D_REGISTRY: dict = {
     'canyon':    make_terrain_3d_canyon,
     'slope':     make_terrain_3d_slope,
     'sawtooth':  make_terrain_3d_sawtooth,
-    'default':   make_terrain_3d_default,
+    'classic':   make_terrain_3d_default,
+    'default':   make_terrain_3d_random_reef,
 }
 
 
@@ -854,13 +933,13 @@ def _integrate_trajectory_path(
 
 
 def make_lawnmower_trajectory(
-    leg_length: float = 100.0,
-    spacing: float = 20.0,
-    n_legs: int = 5,
+    leg_length: float = 20.0,
+    spacing: float = 7.0,
+    n_legs: int = 20,
     orientation_deg: float = 0.0,
     start_x: float = 0.0,
     start_y: float = 0.0,
-    turn_rate: float = 0.0,
+    turn_rate: float = 0.25,
     survey_speed: float = 0.5,
 ) -> tuple:
     """Build a lawnmower survey trajectory with smooth arc corners.
@@ -966,21 +1045,16 @@ class Simulator3D:
     """3D AUV simulation.
 
     The vehicle follows an XY trajectory while depth is controlled by the
-    same 2D obstacle avoidance system as :class:`Simulator`.  Sensor beams
-    (DVL, sonar) are cast in 3D against the terrain function and projected
-    onto the vehicle's along-heading axis before being fed to the occupancy
-    map — so the map always represents the vertical cross-section in the
-    direction of travel.
+    same 2D obstacle avoidance system as :class:`Simulator`. Sensor beams
+    (DVL, sonar) are cast in 3D against the terrain function and submitted
+    via the ObstacleMapper interface — the mapper projects them onto the
+    along-heading axis internally.
 
     Args:
-        terrain_fn:  ``f(x, y) → depth`` callable.  Use :func:`make_terrain_3d`
-            or :func:`extrude_terrain_3d` to create one.
+        terrain_fn:  ``f(x, y) → depth`` callable.
         trajectory:  :class:`Trajectory3D` instance or ``None`` for straight.
-        initial_x / initial_y / initial_heading_deg:  Starting XY position
-            and heading.
-        initial_depth:  Starting depth (m, positive down).  Default 0.0
-            (surface) — the vehicle dives via sensor-driven path planning,
-            matching how a real AUV would start a mission.
+        initial_x / initial_y / initial_heading_deg:  Starting XY position and heading.
+        initial_depth:  Starting depth (m, positive down).
     """
 
     _STUCK_WINDOW_STEPS:    int   = 100
@@ -994,50 +1068,56 @@ class Simulator3D:
         omap_config: Optional[OccupancyMapConfig] = None,
         dvl_config:  Optional[DVLConfig]           = None,
         sonar_config: Optional[SonarConfig]        = None,
+        altimeter_config: Optional[AltimeterConfig] = None,
         terrain_fn:  Optional[Callable]            = None,
         trajectory:  Optional[Trajectory3D]        = None,
         initial_x:   float = 0.0,
         initial_y:   float = 0.0,
         initial_depth: float = 0.0,
         initial_heading_deg: float = 0.0,
-        turn_voxel_mirror: bool = False,
-        turn_mirror_threshold_deg: float = 30.0,
+        dvl_hz: float = 8.0,
+        altimeter_hz: float = 2.0,
+        sonar_hz: float = 1.0,
+        control_hz: float = 10.0,
         debug: bool = True,
     ):
-        self.omap  = OccupancyMap(omap_config or OccupancyMapConfig())
-        self.dvl   = dvl_config   or DVLConfig()
-        self.sonar = sonar_config or SonarConfig()
+        self.dvl       = dvl_config       or DVLConfig()
+        self.sonar     = sonar_config     or SonarConfig()
+        self.altimeter = altimeter_config or AltimeterConfig()
+        self.mapper = ObstacleMapper(
+            omap_config or OccupancyMapConfig(),
+            self.dvl,
+            self.sonar,
+            self.altimeter,
+        )
+        self._dvl_period   = 1.0 / dvl_hz
+        self._alt_period   = 1.0 / altimeter_hz
+        self._sonar_period = 1.0 / sonar_hz
+        self._ctrl_period  = 1.0 / control_hz
+        self._dvl_last_t   = -self._dvl_period
+        self._alt_last_t   = -self._alt_period
+        self._sonar_last_t = -self._sonar_period
+        self._ctrl_last_t  = -self._ctrl_period
         self.terrain_fn = terrain_fn or make_terrain_3d('default')
         self.trajectory = trajectory or StraightTrajectory3D(initial_heading_deg)
         self.debug = debug
 
-        # 3D vehicle state
         self.vehicle_x: float = initial_x
         self.vehicle_y: float = initial_y
         self.vehicle_z: float = initial_depth
         self.vehicle_heading: float = np.radians(initial_heading_deg)
-        self.arc_length: float = 0.0   # cumulative along-track distance
+        self.arc_length: float = 0.0
         self.time: float = 0.0
 
-        # Along-track offset so that "arc_local" fed to the occupancy map starts
-        # at 0 on initialisation and increases monotonically with arc_length.
-        self._arc_offset: float = 0.0
+        # Cached control outputs — updated at control_hz, applied every dt
+        self._ctrl_vx: float = 0.0   # forward speed (m/s)
+        self._ctrl_vz: float = 0.0   # heave rate (m/s, positive = dive)
 
-        # Turn-mirror: when the heading change accumulated within the last
-        # horizon_fwd metres reaches the threshold, filled voxels behind the
-        # vehicle are max-merged into the symmetric columns ahead.
-        # Uses omap.turn_dh_bins — a 1-D array with the same nx and dx as the
-        # occupancy grid.  Each column accumulates the heading change (rad) that
-        # occurred while the vehicle was in that spatial bin.  The array slides
-        # left identically to omap.grid via advance(), so the window is always
-        # exactly the last horizon_fwd metres of travel.
-        self.turn_voxel_mirror: bool = turn_voxel_mirror
-        self._turn_mirror_threshold: float = np.radians(turn_mirror_threshold_deg)
-        self._last_heading: float = np.radians(initial_heading_deg)
+        self.mapper.reset(Pose(
+            north=initial_x, east=initial_y,
+            depth=initial_depth, heading=self.vehicle_heading,
+        ))
 
-        self.omap.reset(0.0, initial_depth)
-
-        # Logging / debug
         self.log: list = []
         self._step_count:       int   = 0
         self._x_history:        deque = deque(maxlen=self._STUCK_WINDOW_STEPS)
@@ -1045,22 +1125,25 @@ class Simulator3D:
         self._mode_history_full:deque = deque(maxlen=self._STUCK_WINDOW_STEPS)
         self._last_stuck_report_x: float = -999.0
 
-        # XY trail stored for visualizer top-down view
         self.xy_trail: list = []
 
-        # Last beam footprints in world XY (None if beam did not hit)
         n_beams = len(self.dvl.beam_angles_rad)
-        self.dvl_hit_xy:   list  = [None] * n_beams  # [(x,y) or None, ...]
-        self.sonar_hit_xy: tuple | None = None        # (x, y) or None
+        self.dvl_hit_xy:   list  = [None] * n_beams
+        self.sonar_hit_xy: tuple | None = None
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @property
+    def omap(self):
+        """OccupancyMap — exposed for visualizer and debug access."""
+        return self.mapper.omap
+
+    @property
     def _arc_local(self) -> float:
-        """Along-track distance from the last occupancy-grid reset."""
-        return self.arc_length - self._arc_offset
+        """Along-track distance traveled (visualizer compatibility)."""
+        return self.arc_length
 
     @staticmethod
     def _wrap_angle(a: float) -> float:
@@ -1072,58 +1155,23 @@ class Simulator3D:
         except Exception:
             return 20.0
 
-    def _mirror_voxels_across_vehicle(self) -> None:
-        """Mirror filled voxels from behind the vehicle into the symmetric columns ahead.
-
-        For each column d bins behind the vehicle's current grid position, the
-        occupancy values are max-merged into the column d bins ahead.  Existing
-        voxels in front are never decreased — this is a conservative "assume the
-        terrain ahead looks like the terrain just passed" operation, intended for
-        use when the vehicle turns sharply near steep walls.
-        """
-        ix_v = int(round((self._arc_local - self.omap.grid_origin_x) / self.omap.cfg.dx))
-        nx   = self.omap.nx
-        for d in range(1, nx):
-            ix_behind = ix_v - d
-            ix_ahead  = ix_v + d
-            if ix_behind < 0 or ix_ahead >= nx:
-                break
-            np.maximum(self.omap.grid[:, ix_ahead],
-                       self.omap.grid[:, ix_behind],
-                       out=self.omap.grid[:, ix_ahead])
-
     # ------------------------------------------------------------------
     # Sensor simulation (3D)
     # ------------------------------------------------------------------
 
     def _simulate_dvl(self):
-        """Simulate Nortek Nucleus 1000 DVL beams in 3D.
-
-        Each beam is defined by (forward, starboard, down) unit-vector components
-        in the vehicle frame (from ``dvl.beam_directions_3d``), rotated into world
-        XY by the vehicle heading.  The 2D projected angles (``dvl.beam_angles_rad``)
-        are returned alongside so the occupancy-map can still use them.
-
-        Returns:
-            ranges, angles_2d, hit_surface, hit_xy
-
-        *hit_xy* is a list with one entry per beam; each entry is either
-        ``(world_x, world_y)`` where the beam intersected the terrain, or
-        ``None`` if the beam did not hit within max_range.
-        """
+        """Ray-trace DVL beams in 3D. Returns (ranges, hit_surface, hit_xy)."""
         h = self.vehicle_heading
-        cos_h, sin_h    = np.cos(h), np.sin(h)
-        beam_dirs       = self.dvl.beam_directions_3d  # (n_beams, 3): fwd, stbd, down
-        angles_2d       = self.dvl.beam_angles_rad
-        n_beams         = len(beam_dirs)
-        ranges          = np.zeros(n_beams)
-        hit_surface     = np.zeros(n_beams, dtype=bool)
-        hit_xy          = [None] * n_beams
+        cos_h, sin_h = np.cos(h), np.sin(h)
+        beam_dirs    = self.dvl.beam_directions_3d
+        n_beams      = len(beam_dirs)
+        ranges       = np.zeros(n_beams)
+        hit_surface  = np.zeros(n_beams, dtype=bool)
+        hit_xy       = [None] * n_beams
 
         for i, (fwd, stbd, down) in enumerate(beam_dirs):
             r = 0.1
             while r < self.dvl.max_range:
-                # Rotate beam direction from vehicle frame to world XY
                 hx = self.vehicle_x + (fwd * cos_h - stbd * sin_h) * r
                 hy = self.vehicle_y + (fwd * sin_h + stbd * cos_h) * r
                 hz = self.vehicle_z + down * r
@@ -1136,19 +1184,25 @@ class Simulator3D:
             if not hit_surface[i]:
                 ranges[i] = self.dvl.max_range
 
-        return ranges, angles_2d, hit_surface, hit_xy
+        return ranges, hit_surface, hit_xy
+
+    def _simulate_altimeter(self):
+        """Simulate altimeter: vertical range to seafloor directly below vehicle."""
+        r = max(0.0, self._terrain_at(self.vehicle_x, self.vehicle_y) - self.vehicle_z)
+        if r >= self.altimeter.max_range:
+            return self.altimeter.max_range, False
+        return r, True
 
     def _simulate_sonar(self):
-        """Forward sonar fan in the vehicle's heading direction.
+        """Ray-trace sonar from vehicle nose in heading direction.
 
-        Returns:
-            min_range, hit, hit_xy
-
-        *hit_xy* is ``(world_x, world_y)`` of the closest sonar return, or
-        ``None`` if nothing was hit within max_range.
+        Returns (range_from_nose, hit, hit_xy).
         """
         h = self.vehicle_heading
         cos_h, sin_h = np.cos(h), np.sin(h)
+        vl = self.mapper.omap.cfg.vehicle_length
+        nose_x = self.vehicle_x + vl / 2.0 * cos_h
+        nose_y = self.vehicle_y + vl / 2.0 * sin_h
         n_rays    = 7
         v_angles  = np.linspace(-self.sonar.half_angle_rad,
                                  self.sonar.half_angle_rad, n_rays)
@@ -1159,11 +1213,11 @@ class Simulator3D:
         for v_ang in v_angles:
             r = 0.2
             while r < self.sonar.max_range:
-                ds    = np.cos(v_ang) * r
-                dz    = np.sin(v_ang) * r
-                hx    = self.vehicle_x + ds * cos_h
-                hy    = self.vehicle_y + ds * sin_h
-                hz    = self.vehicle_z + dz
+                ds = np.cos(v_ang) * r
+                dz = np.sin(v_ang) * r
+                hx = nose_x + ds * cos_h
+                hy = nose_y + ds * sin_h
+                hz = self.vehicle_z + dz
                 if hz >= self._terrain_at(hx, hy):
                     noisy_r = r + np.random.normal(0, self.sonar.noise_std)
                     if noisy_r < min_range:
@@ -1180,12 +1234,8 @@ class Simulator3D:
     # ------------------------------------------------------------------
 
     def _cmd_depth_at_arc(self, arc: float) -> float:
-        """Linearly interpolate ``omap.cmd_depth`` at an along-track arc x.
-
-        Returns vehicle_z (no-op fallback) if the interpolation can't be
-        evaluated (NaN endpoints, out-of-grid, etc.).
-        """
-        omap = self.omap
+        """Linearly interpolate mapper.omap.cmd_depth at along-track position arc."""
+        omap = self.mapper.omap
         if omap.nx < 2:
             return self.vehicle_z
         rel = (arc - omap.grid_origin_x) / omap.cfg.dx
@@ -1203,8 +1253,7 @@ class Simulator3D:
             return float(z_high)
         if np.isnan(z_high):
             return float(z_low)
-        t = rel - ix_low
-        t = max(0.0, min(1.0, t))
+        t = max(0.0, min(1.0, rel - ix_low))
         return float(z_low + t * (z_high - z_low))
 
     # ------------------------------------------------------------------
@@ -1214,123 +1263,88 @@ class Simulator3D:
     def step(self, dt: float):
         """Advance simulation by *dt* seconds.
 
-        Motion model is mode-aware:
-        - ALT_FOLLOW: constant forward velocity (``survey_speed``); vertical
-          follows the cmd_depth target, bounded by ``vertical_speed``.
-        - OBSTACLE_CLEAR / ALT_CORRECTION: vertical motion (at
-          ``vertical_speed``, zero forward) when the cmd_depth target differs
-          from the vehicle's depth; otherwise horizontal motion (at
-          ``survey_speed``, zero vertical) for the clearance-adjustment phase
-          when the safety cap holds cmd_depth at the vehicle's depth.
+        Each step: kinematics are integrated first so the vehicle pose is
+        current, then sensor callbacks fire with that accurate pose, then the
+        control loop ticks (at control_hz) and updates the cached velocity
+        commands that will drive the next steps.
+
+        Order:
+          1. Integrate kinematics → updated (x, y, z, arc_length, t).
+          2. Update heading for the new position/arc_length.
+          3. Build pose from updated position and heading.
+          4. Fire sensors (DVL / altimeter / sonar) with current pose.
+          5. Control tick (10 Hz): pass pose to mapper, query altitude + command, update vx/vz cache.
         """
-        speed = self.omap.cfg.survey_speed
-        v_speed = self.omap.cfg.vertical_speed
-
-        # --- Update heading from trajectory ---
-        new_h = self.trajectory.heading_at(self.arc_length, self.vehicle_x, self.vehicle_y)
-        dh = self._wrap_angle(new_h - self._last_heading)   # signed: +left, -right
-        self.vehicle_heading = new_h
-        self._last_heading   = new_h
-
-        arc_local = self._arc_local   # along-track from last reset
-
-        # --- Sensor updates ---
-        dvl_ranges, dvl_angles, dvl_hits, dvl_hit_xy = self._simulate_dvl()
-        self.dvl_hit_xy = dvl_hit_xy
-        self.omap.update_dvl_ray(
-            dvl_ranges, dvl_angles,
-            self.vehicle_z, arc_local,
-            hit_surface=dvl_hits,
-        )
-
-        sonar_range, sonar_hit, sonar_hit_xy = self._simulate_sonar()
-        self.sonar_hit_xy = sonar_hit_xy
-        self.omap.update_sonar(
-            sonar_range, self.sonar.half_angle_rad,
-            self.vehicle_z, arc_local,
-            sonar_hit,
-        )
-
-        # --- Build manifold and path ---
-        cmd_depth = self.omap.update(self.vehicle_z)
-
-        # --- Mode-aware motion ---
-        mode = self.omap.control_mode
-        max_dz = v_speed * dt
-
-        if mode == "ALT_FOLLOW":
-            # Constant forward velocity.  Vertical tracks cmd_depth at the
-            # vehicle's new arc-x, bounded by vertical_speed.
-            forward_ds = speed * dt
-            target_z = self._cmd_depth_at_arc(arc_local + forward_ds)
-            dz = target_z - self.vehicle_z
-            if abs(dz) > max_dz:
-                dz = np.sign(dz) * max_dz
-            self.vehicle_z += dz
-            step_ds = forward_ds
-        elif mode in ("OBSTACLE_CLEAR", "ALT_CORRECTION"):
-            # Vertical or horizontal — never both.  cmd_depth at vehicle's
-            # column tells us which:
-            #   - |dz| above threshold → vertical at vertical_speed.
-            #   - |dz| at threshold (cmd_depth capped at vehicle_depth by
-            #     safety) → horizontal at survey_speed.
-            target_z = cmd_depth if not np.isnan(cmd_depth) else self.vehicle_z
-            dz = target_z - self.vehicle_z
-            if abs(dz) > 0.1:
-                if abs(dz) > max_dz:
-                    dz = np.sign(dz) * max_dz
-                self.vehicle_z += dz
-                step_ds = 0.0
-            else:
-                step_ds = speed * dt
-        else:
-            step_ds = speed * dt
-
+        # 1. Integrate kinematics with current cached velocity commands
+        cos_h = np.cos(self.vehicle_heading)
+        sin_h = np.sin(self.vehicle_heading)
+        step_ds = self._ctrl_vx * dt
         if step_ds > 0:
             self.arc_length += step_ds
-            self.omap.advance(step_ds)
-            cos_h = np.cos(self.vehicle_heading)
-            sin_h = np.sin(self.vehicle_heading)
-            self.vehicle_x += step_ds * cos_h
-            self.vehicle_y += step_ds * sin_h
-
-        # --- Turn-mirror: spatial-bin sliding-window check ---
-        # Accumulate SIGNED heading change into the vehicle's current column.
-        # omap.advance() already slid turn_dh_bins left, so cx is always the
-        # vehicle's current bin and bins 0..cx-1 hold the behind history.
-        cx = self.omap.cx
-        self.omap.turn_dh_bins[cx] += dh
-        # Iterate backwards from cx, accumulating the signed running sum.
-        # Opposite turns cancel out (e.g. 20° left + 20° right = 0°) so
-        # back-and-forth oscillation never triggers.  Stop as soon as the
-        # absolute running sum exceeds the threshold (short-circuit).
-        if self.turn_voxel_mirror:
-            horizon_bins = min(cx + 1, int(round(self.omap.cfg.horizon_fwd / self.omap.cfg.dx)))
-            running = 0.0
-            triggered = False
-            for i in range(cx, cx - horizon_bins, -1):
-                running += self.omap.turn_dh_bins[i]
-                if abs(running) >= self._turn_mirror_threshold:
-                    triggered = True
-                    break
-            if triggered:
-                self._mirror_voxels_across_vehicle()
-                self.omap.turn_dh_bins[:] = 0.0  # clear all bins after trigger
-
-        # Clamp vehicle depth at the water surface — vehicle cannot fly
-        # above water.
-        if self.vehicle_z < 0.0:
-            self.vehicle_z = 0.0
-
-        self.omap.shift_depth(self.vehicle_z)
+            self.vehicle_x  += step_ds * cos_h
+            self.vehicle_y  += step_ds * sin_h
+        self.vehicle_z += self._ctrl_vz * dt
+        self.vehicle_z  = max(0.0, self.vehicle_z)
         self.time += dt
 
-        # Track XY trail (keep last 2000 points)
+        # 2. Heading at updated position
+        self.vehicle_heading = self.trajectory.heading_at(
+            self.arc_length, self.vehicle_x, self.vehicle_y
+        )
+
+        # 3. Pose from updated state
+        pose = Pose(
+            north=self.vehicle_x, east=self.vehicle_y,
+            depth=self.vehicle_z, heading=self.vehicle_heading,
+        )
+
+        # 4. Sensor callbacks with accurate pose
+        if self.time >= self._dvl_last_t + self._dvl_period:
+            dvl_ranges, dvl_hits, dvl_hit_xy = self._simulate_dvl()
+            self.dvl_hit_xy = dvl_hit_xy
+            self.mapper.update_sensor(SensorType.DVL, DVLMeasurement(dvl_ranges, dvl_hits), pose)
+            self._dvl_last_t += self._dvl_period
+
+        if self.time >= self._alt_last_t + self._alt_period:
+            alt_range, alt_hit = self._simulate_altimeter()
+            self.mapper.update_sensor(SensorType.ALTIMETER, AltimeterMeasurement(alt_range, alt_hit), pose)
+            self._alt_last_t += self._alt_period
+
+        if self.time >= self._sonar_last_t + self._sonar_period:
+            sonar_range, sonar_hit, sonar_hit_xy = self._simulate_sonar()
+            self.sonar_hit_xy = sonar_hit_xy
+            self.mapper.update_sensor(SensorType.SONAR, SonarMeasurement(sonar_range, sonar_hit), pose)
+            self._sonar_last_t += self._sonar_period
+
+        # 5. Control tick — runs at control_hz, independent of sensor rates
+        if self.time >= self._ctrl_last_t + self._ctrl_period:
+            self.mapper.update_pose(pose)
+            ctrl_alt = self.mapper.get_altitude()
+            ctrl_cmd = self.mapper.get_control()
+            c = self.mapper.omap.cfg
+            self._ctrl_vx = ctrl_cmd.vx
+            if ctrl_cmd.vertical_mode == 'ALT_FOLLOW':
+                if not np.isnan(ctrl_alt):
+                    # Positive vz = dive; positive when alt > target (need to descend)
+                    self._ctrl_vz = float(np.clip(
+                        ctrl_alt - ctrl_cmd.vertical_target,
+                        -c.vertical_speed, c.vertical_speed,
+                    ))
+                else:
+                    self._ctrl_vz = 0.0
+            else:  # DEPTH_HOLD
+                self._ctrl_vz = float(np.clip(
+                    ctrl_cmd.vertical_target - self.vehicle_z,
+                    -c.vertical_speed, c.vertical_speed,
+                ))
+            self._ctrl_last_t += self._ctrl_period
+
+        cmd_depth = self.mapper.omap.get_commanded_depth_at_vehicle()
+
         self.xy_trail.append((float(self.vehicle_x), float(self.vehicle_y)))
         if len(self.xy_trail) > 2000:
             self.xy_trail = self.xy_trail[-2000:]
 
-        # --- Log state ---
         terrain_z = self._terrain_at(self.vehicle_x, self.vehicle_y)
         altitude  = terrain_z - self.vehicle_z
         state = {
@@ -1357,16 +1371,19 @@ class Simulator3D:
     def _debug_check(self, terrain_z: float, altitude: float):
         self._step_count += 1
         self._x_history.append(self.arc_length)
-        self._mode_history.append(self.omap.control_mode)
-        self._mode_history_full.append(self.omap.control_mode)
+        omap = self.mapper.omap
+        self._mode_history.append(omap.control_mode)
+        self._mode_history_full.append(omap.control_mode)
 
         if self._step_count % self._PERIODIC_PRINT_STEPS == 0:
             h_deg = np.degrees(self.vehicle_heading) % 360.0
+            alt_reading = self.mapper.get_altitude()
+            alt_s = f"{alt_reading:5.2f}" if not np.isnan(alt_reading) else "  nan"
             print(
                 f"[T={self.time:7.1f}s  X={self.vehicle_x:7.1f}m  Y={self.vehicle_y:7.1f}m  "
                 f"Z={self.vehicle_z:6.2f}m  hdg={h_deg:5.1f}°  "
                 f"alt={altitude:5.2f}m  terrain={terrain_z:6.2f}m  "
-                f"mode={self.omap.control_mode:<15} dvl={self.omap.dvl_altitude:5.2f}m]"
+                f"mode={omap.control_mode:<15} sensor_alt={alt_s}m]"
             )
 
         if len(self._x_history) < self._STUCK_WINDOW_STEPS:

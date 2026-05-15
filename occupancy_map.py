@@ -11,26 +11,48 @@ ignoring lateral (Y) offsets.
 
 The "cliff world" manifold extracts the top surface of occupied voxels as a
 stair-step polyline.  A path planner generates a commanded depth profile over
-this manifold using a three-mode strategy:
+this manifold using several control modes with fixed priority:
 
-  Mode: ALT_FOLLOW  (default)
+  1) Forward obstacle clearance (highest).  While the cliff-top latch is
+     active, OBSTACLE_CLEAR / OBSTACLE_HOLD dominate — ascent or forward
+     clear at latch depth until ``release_x``.  Outside the latch,
+     OBSTACLE_CLEAR (vehicle below commanded depth threshold) similarly
+     takes precedence — no tail-only override.
+
+  2) Tail clearance vs altitude following / correction.  If the tail
+     safety band fires (see ``_safety_tail_blocked``) and the vehicle would
+     otherwise be ALT_FOLLOW or ALT_CORRECTION, switch to TAIL_CLEAR constant-
+     depth forward flight until the tail clears.
+
+  3) Else ALT_FOLLOW (terrain-following / imaging_altitude),
+     or ALT_CORRECTION (descend in place when altitude is high).
+
+Individual modes:
+
+  Mode: ALT_FOLLOW  (default when forward + tail constraints satisfied)
     Track imaging_altitude above the raw manifold (terrain-following).
 
-  Mode: OBSTACLE_CLEAR  (forward obstacle or cliff detected)
-    Begin climbing cliff_standoff metres before the obstacle face.
-    Rise to imaging_altitude above the shallowest observed obstacle voxel.
-    Hold that depth (depth-control) for cliff_standoff metres past the
-    last elevated obstacle column so the altimeter can lock on the new
-    surface, then return to ALT_FOLLOW on top of the obstacle/cliff.
+  Mode: OBSTACLE_CLEAR  (forward obstacle or commanded climb, vehicle deep)
+    Vehicle ascends in place (vx=0) toward the latch target depth, or toward
+    ``cmd_depth[cx]`` when no latch applies.
+
+  Mode: OBSTACLE_HOLD  (latch active, vehicle at or above target depth)
+    Vehicle flies forward at survey_speed holding the latch target depth
+    (DEPTH_HOLD).  Active until the vehicle passes release_x (target_x +
+    cliff_standoff + vehicle_length + 1 m).  The latch can only be updated
+    to a shallower target — never overridden or released early.
 
   Mode: ALT_CORRECTION  (altitude diverges above imaging altitude target)
-    Triggered when vehicle's altitude exceeds imaging altitude by more
+    Triggered when vehicle depth is shallower than ``cmd_depth[cx]`` by more
     than ``altitude_overshoot_threshold_m``.  Vehicle stops forward motion
-    and descends in place toward imaging altitude.  Safety check still
-    runs and forces horizontal motion when the tail is too close to the
-    terrain behind.  Naturally handles cliff descents (altitude shoots up
-    on cliff edge) and steep slopes (altitude drifts up when the slope
-    descends faster than vertical_speed × dt per forward step).
+    and descends in place toward imaging altitude unless TAIL_CLEAR applies.
+
+  Mode: TAIL_CLEAR  (tail clearance — overrides ALT_FOLLOW / ALT_CORRECTION)
+    Terrain within ``safety_below_m`` below the vehicle is detected in the
+    tail window (vehicle centre back to ``safety_standoff_m`` behind the
+    tail).  Vehicle drives forward at survey_speed at current depth
+    (DEPTH_HOLD) until ``_safety_tail_blocked`` clears, without diving for
+    imaging altitude.
 
 Coordinate conventions:
     X: forward (positive ahead of vehicle)
@@ -48,9 +70,135 @@ Usage:
     path = omap.get_commanded_depth_path()
 """
 
+import threading
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional
+from enum import Enum
+from typing import Optional, Union
+
+
+@dataclass
+class DVLConfig:
+    """DVL beam configuration.
+
+    Each beam entry is (slant_angle_deg, heading_offset_deg):
+      - slant_angle: angle from vertical (0 = straight down)
+      - heading_offset: angle from vehicle forward (0 = forward, 90 = starboard)
+
+    Default: Nortek Nucleus 1000 — 1 altimeter + 3 Janus beams at 20° slant.
+    """
+    beams: list = field(default_factory=lambda: [
+        ( 0.0,   0.0),   # altimeter: straight down
+        (20.0,   0.0),   # beam 1: forward-down
+        (20.0, 120.0),   # beam 2: right-rear-down
+        (20.0, 240.0),   # beam 3: left-rear-down
+    ])
+    max_range: float = 50.0
+
+    @property
+    def beam_angles_rad(self) -> np.ndarray:
+        """2D projected angle from vertical (positive = forward) for each beam.
+
+        A beam with slant s and heading offset h projects to
+        atan2(sin(s)*cos(h), cos(s)).
+        """
+        angles = []
+        for slant_deg, h_off_deg in self.beams:
+            s = np.radians(slant_deg)
+            h = np.radians(h_off_deg)
+            angles.append(np.arctan2(np.sin(s) * np.cos(h), np.cos(s)))
+        return np.array(angles)
+
+    @property
+    def beam_directions_3d(self) -> np.ndarray:
+        """Unit vectors per beam in vehicle frame (forward, starboard, down).
+
+        Shape (n_beams, 3). Scale by range to get displacement to terrain hit.
+        """
+        dirs = []
+        for slant_deg, h_off_deg in self.beams:
+            s = np.radians(slant_deg)
+            h = np.radians(h_off_deg)
+            dirs.append((np.sin(s) * np.cos(h),
+                         np.sin(s) * np.sin(h),
+                         np.cos(s)))
+        return np.array(dirs)
+
+
+@dataclass
+class SonarConfig:
+    """Forward-looking sonar configuration."""
+    max_range: float = 12.0
+    half_angle: float = 3.0    # half beam width (degrees)
+    noise_std: float = 0.3     # range measurement noise std (m)
+
+    @property
+    def half_angle_rad(self) -> float:
+        return np.radians(self.half_angle)
+
+
+@dataclass
+class AltimeterConfig:
+    """Downward-looking altimeter configuration."""
+    max_range: float = 100.0
+
+
+@dataclass
+class Pose:
+    """Vehicle pose in NED frame.
+
+    heading: compass radians, 0 = North, clockwise positive.
+    depth: positive downward (m).
+    """
+    north: float
+    east: float
+    depth: float
+    heading: float
+
+
+class SensorType(Enum):
+    DVL = "dvl"
+    ALTIMETER = "altimeter"
+    SONAR = "sonar"
+
+
+@dataclass
+class DVLMeasurement:
+    """Range measurement from a DVL instrument."""
+    ranges: np.ndarray      # range per beam (m), shape (n_beams,)
+    hit_surface: np.ndarray # bool per beam, shape (n_beams,)
+
+
+@dataclass
+class AltimeterMeasurement:
+    """Single-beam downward-looking altimeter measurement."""
+    range_m: float
+    hit: bool = True
+
+
+@dataclass
+class SonarMeasurement:
+    """Forward sonar closest-return measurement."""
+    range_m: float   # range from sonar face (nose of vehicle)
+    hit: bool        # True if a return was detected
+
+
+@dataclass
+class ControlCommand:
+    """Obstacle avoidance command returned by ObstacleMapper.get_control().
+
+    vx:              Desired forward speed (m/s).  Zero during a vertical
+                     transit in DEPTH_HOLD mode; survey_speed otherwise.
+    vertical_mode:   'ALT_FOLLOW' — external controller should maintain
+                     *vertical_target* metres altitude above the seafloor.
+                     'DEPTH_HOLD' — external controller should hold the vehicle
+                     at exactly *vertical_target* metres depth.
+    vertical_target: ALT_FOLLOW: desired altitude above seafloor (m).
+                     DEPTH_HOLD: desired vehicle depth (m, positive = down).
+    """
+    vx: float
+    vertical_mode: str    # 'ALT_FOLLOW' | 'DEPTH_HOLD'
+    vertical_target: float
 
 
 @dataclass
@@ -100,11 +248,34 @@ class OccupancyMapConfig:
                                                   # vertical_speed-bounded
                                                   # descent to keep up.
 
-    # Safety tail check (always active).  Caps cmd_depth at vehicle_depth
-    # whenever manifold is found within ``safety_below_m`` below the vehicle
-    # and within ``safety_standoff_m`` horizontal of the tail.  Prevents the
-    # tail from skimming terrain in any mode.
-    safety_standoff_m: float = 1.0    # Horizontal clearance behind tail (m)
+    # Hysteresis on top of altitude_overshoot_threshold_m when choosing
+    # OBSTACLE_CLEAR vs ALT_FOLLOW vs ALT_CORRECTION.  Once in an in-place
+    # vertical transect mode, retain it until commanded depth agrees with the
+    # vehicle depth within roughly (threshold - hysteresis); damps chatter when
+    # noisy manifold/DVL jitter steps ``cmd_depth[cx]`` across the threshold
+    # (common on procedural / rugose reef terrain).
+    altitude_overshoot_hysteresis_m: float = 0.5
+
+    # Low-pass blend for mode selection ONLY: ``cmd_mode = β·cmd_raw + (1-β)·cmd_mode``.
+    # ``cmd_depth[cx]`` and DEPTH_HOLD targets stay instantaneous; hysteresis+EMA operate
+    # on cmd_mode for OBSTACLE_CLEAR vs ALT_CORRECTION so reef/raster noise cannot flip
+    # ``dz`` past ±threshold every planner tick.  β=0 disables (raw cmd_depth).
+    altitude_mode_cmd_depth_ema_blend: float = 0.22
+
+    # Stale-observation heading gate.  Any occupied voxel whose stored
+    # observation heading differs from the current vehicle heading by more
+    # than this threshold is reset to prior probability.  Prevents filled
+    # voxels from a previous heading from triggering obstacle-avoidance on
+    # a new heading where that space is actually clear.
+    stale_heading_threshold_deg: float = 45.0
+
+    # Safety clearance check (always active).  Fires when any observed manifold
+    # column is found within ``safety_below_m`` below the vehicle AND within
+    # the horizontal zone from the vehicle nose (vehicle_x + vehicle_length/2)
+    # back ``safety_standoff_m`` metres behind the vehicle centre.  Used both
+    # to cap cmd_depth (prevent diving when terrain is close below the body)
+    # and by get_control() to decide whether descent-in-place is safe.
+    safety_standoff_m: float = 2.0    # Distance behind vehicle centre (m)
     safety_below_m: float = 1.0       # Depth band below vehicle (m)
 
     # Occupancy probability parameters
@@ -112,16 +283,25 @@ class OccupancyMapConfig:
     occ_thresh: float = 0.62      # Threshold to consider a voxel occupied
 
     # DVL observation model
-    dvl_hit_prob: float = 0.14    # P(occupied | hit) increment
-    dvl_miss_prob: float = 0.07   # P(free | miss) decrement
+    dvl_hit_prob: float = 0.2     # P(occupied | hit) increment
+    dvl_miss_prob: float = 0.1    # P(free | miss) decrement
     dvl_max_occ: float = 0.98     # Max occupancy from DVL
     dvl_min_occ: float = 0.02     # Min occupancy from DVL
+    # Instrument max range (m): nadir fallback in update_dvl_ray when range
+    # is clearly not a max-range miss but hit flags are all false.
+    dvl_max_range_m: float = 50.0
 
-    # Forward sonar observation model (noisier, lower confidence)
-    sonar_hit_prob: float = 0.04  # P(occupied | hit) increment
-    sonar_miss_prob: float = 0.02 # P(free | miss) decrement
-    sonar_max_occ: float = 0.92   # Max occupancy from sonar
-    sonar_min_occ: float = 0.05   # Min occupancy from sonar
+    # Altimeter observation model
+    altimeter_hit_prob: float = 0.2   # P(occupied | hit) increment
+    altimeter_miss_prob: float = 0.1  # P(free | miss) decrement
+    altimeter_max_occ: float = 0.98   # Max occupancy from altimeter
+    altimeter_min_occ: float = 0.02   # Min occupancy from altimeter
+
+    # Forward sonar observation model
+    sonar_hit_prob: float = 0.2   # P(occupied | hit) increment
+    sonar_miss_prob: float = 0.1  # P(free | miss) decrement
+    sonar_max_occ: float = 0.98   # Max occupancy from sonar
+    sonar_min_occ: float = 0.02   # Min occupancy from sonar
 
 
 class OccupancyMap:
@@ -153,12 +333,14 @@ class OccupancyMap:
         # Occupancy grid: probability of occupancy [0, 1]
         self.grid = np.full((self.nz, self.nx), c.prior, dtype=np.float64)
 
-        # Spatially-binned heading-change accumulator (1-D, same nx as grid).
-        # Each column accumulates the total heading change (radians) that
-        # occurred while the vehicle occupied that spatial bin.  Slides left
-        # with the grid via advance() and is reset to zero in reset().
-        # Used by Simulator3D for the turn-mirror sliding-window check.
-        self.turn_dh_bins: np.ndarray = np.zeros(self.nx, dtype=np.float64)
+        # Per-voxel observation heading (radians).  Stores the vehicle heading
+        # at the time a voxel was last marked occupied.  NaN for voxels with no
+        # occupied observation (free or unobserved).  Slides with the grid via
+        # advance() / shift_depth().  Used by clear_stale_voxels() to invalidate
+        # occupied voxels that are inconsistent with the current vehicle heading.
+        self.voxel_heading: np.ndarray = np.full(
+            (self.nz, self.nx), np.nan, dtype=np.float32
+        )
 
         # Grid origin in world X coordinates
         self.grid_origin_x: float = 0.0  # World X of column 0
@@ -207,9 +389,10 @@ class OccupancyMap:
         self.manifold_grid_origin_x: float = 0.0
 
         # Direct DVL altitude: minimum vertical-component range across surface-
-        # hitting beams, updated each cycle by update_dvl_ray.  Used as the
-        # altitude-following reference at the vehicle's current column instead
-        # of the occupancy-filtered manifold, giving faster terrain response.
+        # hitting beams, updated each cycle by update_dvl_ray.  ``NaN`` when no
+        # beam had a valid bottom return this cycle (do not reuse stale values).
+        # Used as the altitude-following reference at the vehicle's current column
+        # instead of the occupancy-filtered manifold, giving faster terrain response.
         self.dvl_altitude: float = np.nan
 
         # Current control mode at vehicle position (for display / logging).
@@ -225,11 +408,14 @@ class OccupancyMap:
         self._cliff_top_target_x: float = np.nan  # ratchets forward only
         self._cliff_top_release_x: float = np.nan
 
+        # Single-column low-pass depth used only inside _set_mode_from_cmd_depth.
+        self._mode_cmd_smooth_z: Optional[float] = None
+
     def reset(self, vehicle_world_x: float = 0.0, vehicle_depth: float = 0.0):
         """Reset the grid to prior probability and re-center on vehicle."""
         c = self.cfg
         self.grid[:, :] = c.prior
-        self.turn_dh_bins[:] = 0.0
+        self.voxel_heading[:, :] = np.nan
         self.grid_origin_x = vehicle_world_x - self.cx * c.dx
         self.grid_origin_z = vehicle_depth - (self.nz // 2) * c.dz
         self.manifold_grid_origin_x = self.grid_origin_x
@@ -246,6 +432,7 @@ class OccupancyMap:
         self._cliff_top_target_z = np.nan
         self._cliff_top_target_x = np.nan
         self._cliff_top_release_x = np.nan
+        self._mode_cmd_smooth_z = None
 
     # -------------------------------------------------------------------------
     # Coordinate transforms
@@ -290,12 +477,12 @@ class OccupancyMap:
 
         if cols >= self.nx:
             self.grid[:, :] = self.cfg.prior
-            self.turn_dh_bins[:] = 0.0
+            self.voxel_heading[:, :] = np.nan
         else:
             self.grid[:, :-cols] = self.grid[:, cols:]
             self.grid[:, -cols:] = self.cfg.prior
-            self.turn_dh_bins[:-cols] = self.turn_dh_bins[cols:]
-            self.turn_dh_bins[-cols:] = 0.0
+            self.voxel_heading[:, :-cols] = self.voxel_heading[:, cols:]
+            self.voxel_heading[:, -cols:] = np.nan
 
     def shift_depth(self, vehicle_z: float) -> None:
         """Shift the Z window so the vehicle stays centred in the depth grid.
@@ -321,17 +508,23 @@ class OccupancyMap:
             # Vehicle moved deeper — drop shallow rows, expose new deep rows
             if rows >= self.nz:
                 self.grid[:, :] = self.cfg.prior
+                self.voxel_heading[:, :] = np.nan
             else:
                 self.grid[:-rows, :] = self.grid[rows:, :]
                 self.grid[-rows:, :] = self.cfg.prior
+                self.voxel_heading[:-rows, :] = self.voxel_heading[rows:, :]
+                self.voxel_heading[-rows:, :] = np.nan
         else:
             # Vehicle moved shallower — drop deep rows, expose new shallow rows
             r = -rows
             if r >= self.nz:
                 self.grid[:, :] = self.cfg.prior
+                self.voxel_heading[:, :] = np.nan
             else:
                 self.grid[r:, :] = self.grid[:-r, :]
                 self.grid[:r, :] = self.cfg.prior
+                self.voxel_heading[r:, :] = self.voxel_heading[:-r, :]
+                self.voxel_heading[:r, :] = np.nan
 
     # -------------------------------------------------------------------------
     # Sensor observation updates
@@ -389,6 +582,7 @@ class OccupancyMap:
         vehicle_world_x: float,
         hit_surface: Optional[np.ndarray] = None,
         range_step: float = 0.15,
+        vehicle_heading: float = np.nan,
     ):
         """
         Update occupancy by ray-marching each DVL beam, and track direct altitude.
@@ -400,6 +594,12 @@ class OccupancyMap:
         component across all beams that actually hit the seafloor:
 
             dvl_altitude = min( range_i * cos(angle_i) )   for hit beams
+
+        If no beam records a valid bottom return (all misses within max range),
+        ``self.dvl_altitude`` is set to ``NaN`` so planners do not reuse a stale
+        altitude from a previous cycle — unless the nadir (beam 0) range is
+        below ``cfg.dvl_max_range_m`` (minus a small margin), in which case it
+        is still used as a bottom return when hit flags are untrusted.
 
         This is the shortest terrain clearance observed by any beam, measured
         along the depth axis.  The altimeter (angle=0) contributes directly;
@@ -438,6 +638,8 @@ class OccupancyMap:
                 if self._in_bounds(ix, iz):
                     self.grid[iz, ix] = max(c.dvl_min_occ,
                                             self.grid[iz, ix] - c.dvl_miss_prob)
+                    if self.grid[iz, ix] <= c.occ_thresh:
+                        self.voxel_heading[iz, ix] = vehicle_heading
                 r += range_step
 
             dx = np.sin(ang) * r_max
@@ -445,13 +647,17 @@ class OccupancyMap:
             ix, iz = self.world_to_grid(vehicle_world_x + dx,
                                         vehicle_depth + dz)
             if self._in_bounds(ix, iz):
+                was_occupied = self.grid[iz, ix] > c.occ_thresh
                 if is_hit:
                     self.grid[iz, ix] = min(c.dvl_max_occ,
                                             self.grid[iz, ix] + c.dvl_hit_prob)
+                    if not was_occupied:
+                        self.voxel_heading[iz, ix] = vehicle_heading
                 else:
                     # No real return — end of beam is also free.
                     self.grid[iz, ix] = max(c.dvl_min_occ,
                                             self.grid[iz, ix] - c.dvl_miss_prob)
+                    self.voxel_heading[iz, ix] = vehicle_heading
 
         # Update direct altitude estimate from surface-hitting beams.
         if hit_surface is not None:
@@ -462,8 +668,64 @@ class OccupancyMap:
                     vert = ranges[i] * np.cos(beam_angles[i])
                     if vert < min_vert:
                         min_vert = vert
+            # Nadir fallback: valid altimeter range before max range, but no
+            # beam flagged as a hit (replay / driver mismatch).  Still trust
+            # the vertical range component so altitude-following does not drop
+            # out while the nadir return is usable.
+            if min_vert >= np.inf and len(ranges) > 0 and len(beam_angles) > 0:
+                r0 = ranges[0]
+                if r0 < c.dvl_max_range_m - 0.05:
+                    min_vert = r0 * np.cos(beam_angles[0])
             if min_vert < np.inf:
                 self.dvl_altitude = min_vert
+            else:
+                self.dvl_altitude = np.nan
+
+    def update_altimeter_ray(
+        self,
+        range_m: float,
+        vehicle_depth: float,
+        vehicle_world_x: float,
+        hit: bool,
+        range_step: float = 0.15,
+        vehicle_heading: float = np.nan,
+    ):
+        """Update occupancy from a straight-down altimeter beam.
+
+        Ray-marches vertically from vehicle depth to range_m, marking cells
+        free along the path and occupied (or free on miss) at the endpoint.
+
+        Args:
+            range_m:          Measured range to seafloor (m).
+            vehicle_depth:    Current vehicle depth (m).
+            vehicle_world_x:  Vehicle X position in world frame (m).
+            hit:              True if the beam returned a valid seafloor return.
+            range_step:       Ray-march step size (m).
+            vehicle_heading:  Vehicle heading (rad) for voxel metadata.
+        """
+        c = self.cfg
+        r = range_step
+        while r < range_m - range_step:
+            ix, iz = self.world_to_grid(vehicle_world_x, vehicle_depth + r)
+            if self._in_bounds(ix, iz):
+                self.grid[iz, ix] = max(c.altimeter_min_occ,
+                                        self.grid[iz, ix] - c.altimeter_miss_prob)
+                if self.grid[iz, ix] <= c.occ_thresh:
+                    self.voxel_heading[iz, ix] = vehicle_heading
+            r += range_step
+
+        ix, iz = self.world_to_grid(vehicle_world_x, vehicle_depth + range_m)
+        if self._in_bounds(ix, iz):
+            was_occupied = self.grid[iz, ix] > c.occ_thresh
+            if hit:
+                self.grid[iz, ix] = min(c.altimeter_max_occ,
+                                        self.grid[iz, ix] + c.altimeter_hit_prob)
+                if not was_occupied:
+                    self.voxel_heading[iz, ix] = vehicle_heading
+            else:
+                self.grid[iz, ix] = max(c.altimeter_min_occ,
+                                        self.grid[iz, ix] - c.altimeter_miss_prob)
+                self.voxel_heading[iz, ix] = vehicle_heading
 
     def update_sonar(
         self,
@@ -474,6 +736,7 @@ class OccupancyMap:
         hit_obstacle: bool,
         range_step: float = 0.2,
         angle_steps: int = 7,
+        vehicle_heading: float = np.nan,
     ):
         """
         Update occupancy from forward-looking sonar observation.
@@ -503,16 +766,25 @@ class OccupancyMap:
                 if self._in_bounds(ix, iz):
                     self.grid[iz, ix] = max(c.sonar_min_occ,
                                             self.grid[iz, ix] - c.sonar_miss_prob)
+                    if self.grid[iz, ix] <= c.occ_thresh:
+                        self.voxel_heading[iz, ix] = vehicle_heading
                 r += range_step
 
-            if hit_obstacle:
-                dx = sonar_range * np.cos(ang)
-                dz = sonar_range * np.sin(ang)
-                ix, iz = self.world_to_grid(vehicle_world_x + dx,
-                                            vehicle_depth + dz)
-                if self._in_bounds(ix, iz):
+            dx = sonar_range * np.cos(ang)
+            dz = sonar_range * np.sin(ang)
+            ix, iz = self.world_to_grid(vehicle_world_x + dx,
+                                        vehicle_depth + dz)
+            if self._in_bounds(ix, iz):
+                was_occupied = self.grid[iz, ix] > c.occ_thresh
+                if hit_obstacle:
                     self.grid[iz, ix] = min(c.sonar_max_occ,
                                             self.grid[iz, ix] + c.sonar_hit_prob)
+                    if not was_occupied:
+                        self.voxel_heading[iz, ix] = vehicle_heading
+                else:
+                    self.grid[iz, ix] = max(c.sonar_min_occ,
+                                            self.grid[iz, ix] - c.sonar_miss_prob)
+                    self.voxel_heading[iz, ix] = vehicle_heading
 
     # -------------------------------------------------------------------------
     # Cliff manifold extraction
@@ -597,14 +869,15 @@ class OccupancyMap:
     # Path planning
     # -------------------------------------------------------------------------
 
-    def _forward_obstacle(self, vehicle_depth: float, vehicle_world_x: float):
+    def _forward_obstacle(self, vehicle_depth: float, vehicle_world_x: float,
+                          z_threshold: Optional[float] = None):
         """Return ``(peak_z, peak_world_x)`` of the shallowest manifold voxel
-        in the nose-forward standoff window, or ``(None, nan)``.
+        in the centre-to-nose-plus-standoff window, or ``(None, nan)``.
 
-        Scans manifold columns whose world-x lies in ``[nose, nose +
-        cliff_standoff]`` and whose depth ``z ≤ vehicle_z + safety_below_m``
-        (within ``safety_below_m`` below the vehicle, or shallower).  The
-        shallowest such voxel is "the obstacle" the avoidance latch must
+        Scans manifold columns whose world-x lies in
+        ``[vehicle_centre, nose + cliff_standoff]`` and whose depth
+        ``z ≤ z_threshold`` (defaults to ``vehicle_z + safety_below_m``).
+        The shallowest such voxel is the obstacle the avoidance latch must
         rise above and clear.
 
         No plateau or cliff-top guards — the latch's ratchet semantics
@@ -615,11 +888,12 @@ class OccupancyMap:
         """
         c = self.cfg
         nose_x = vehicle_world_x + c.vehicle_length / 2.0
-        x_min = nose_x
-        x_max = nose_x + c.cliff_standoff
-        z_max = vehicle_depth + c.safety_below_m
+        x_min = vehicle_world_x           # vehicle centre
+        x_max = nose_x + c.cliff_standoff  # nose + 2m
+        z_max = (z_threshold if z_threshold is not None
+                 else vehicle_depth + c.safety_below_m)
 
-        ix_lo = max(self.cx + 1,
+        ix_lo = max(self.cx,
                     int(np.floor((x_min - self.grid_origin_x) / c.dx)))
         ix_hi = min(self.nx,
                     int(np.ceil((x_max - self.grid_origin_x) / c.dx)) + 1)
@@ -643,44 +917,35 @@ class OccupancyMap:
         return peak_z, self.grid_to_world_x(peak_ix)
 
     def _safety_tail_blocked(self, vehicle_depth: float) -> bool:
-        """Always-on tail clearance check.
+        """Tail clearance check: centre to 2m behind the tail, 1m below.
 
-        Fires when any observed manifold COLUMN behind the vehicle has its
-        z value in the band ``[vehicle_depth, vehicle_depth + safety_below_m)``
-        AND its world-x in the standoff zone
-        ``[v_x - (safety_standoff_m + vehicle_length/2), v_x)``.
+        Fires when any observed manifold column has its world-x in
+        ``[tail_x - safety_standoff_m, v_x]`` AND its manifold z in
+        ``[vehicle_depth, vehicle_depth + safety_below_m)``.
 
-        Used as a depth cap: if it fires, ``cmd_depth`` from ``cx`` onward is
-        capped at ``vehicle_depth``, preventing the vehicle from diving
-        deeper while still allowing alt-follow's upward commands (shallower
-        cmd_depth) to pass through.
-
-        Column-based (not segment-interpolated) on purpose: a cliff face
-        segment's z range linearly spans [cliff_top, cliff_base] and a
-        segment-based check would interpret this as "manifold close to tail
-        throughout the descent."  In reality the cliff face is at one
-        column (the edge), the tail's x has already passed it, and the
-        descent should be allowed.  Column-based avoids that false positive.
-        Catches slopes whose per-bin drop is < safety_below_m (i.e., slope
-        angle < ~atan(safety_below_m / dx) ≈ 63° at defaults).  Steeper
-        terrain falls under ALT_CORRECTION via altitude divergence.
+        The window spans from the vehicle centre back to 2m behind the tail
+        (tail = centre - vehicle_length/2).  When it fires, descent-in-place
+        is unsafe — the vehicle would drive into terrain below or behind it.
         """
         c = self.cfg
-        standoff = c.safety_standoff_m + c.vehicle_length / 2.0
-        look_behind_bins = int(np.ceil(standoff / c.dx))
+        v_x = self.grid_to_world_x(self.cx)
+        tail_x = v_x - c.vehicle_length / 2.0
+        x_min = tail_x - c.safety_standoff_m  # 2m behind tail
+        x_max = v_x                            # vehicle centre
         z_lo = vehicle_depth
         z_hi = vehicle_depth + c.safety_below_m
-        v_x = self.grid_to_world_x(self.cx)
-        standoff_x_min = v_x - standoff
-        start = max(0, self.cx - look_behind_bins)
-        for ix in range(start, self.cx):
+
+        ix_lo = max(0, int(np.floor((x_min - self.grid_origin_x) / c.dx)))
+        ix_hi = min(self.nx, int(np.ceil((x_max - self.grid_origin_x) / c.dx)) + 1)
+
+        for ix in range(ix_lo, ix_hi):
             if not self.manifold_observed[ix]:
                 continue
             z = self.manifold_z[ix]
             if not (z_lo <= z < z_hi):
                 continue
             x = self.grid_to_world_x(ix)
-            if standoff_x_min <= x < v_x:
+            if x_min <= x <= x_max:
                 return True
         return False
 
@@ -714,10 +979,16 @@ class OccupancyMap:
             ``safety_below_m`` below the vehicle AND within
             ``safety_standoff_m`` horizontal of the tail.
 
-        Mode selection from final ``cmd_depth[cx] - vehicle_depth``:
+        Mode selection from final ``cmd_depth[cx] - vehicle_depth`` (when the
+        cliff latch does not consume the cycle), using a Schmitt-like band via
+        ``altitude_overshoot_hysteresis_m`` so small ``cmd_depth`` jitter does not
+        flip OBSTACLE_CLEAR ↔ ALT_CORRECTION:
           OBSTACLE_CLEAR — vehicle below target (must ascend in place).
           ALT_CORRECTION — vehicle above target (must descend in place).
-          ALT_FOLLOW    — within ``altitude_overshoot_threshold_m`` of target.
+          ALT_FOLLOW    — within hysteresis-augmented band of target.
+        Then, if ``_safety_tail_blocked`` and mode is ALT_FOLLOW or
+        ALT_CORRECTION → TAIL_CLEAR (constant-depth forward flight).  Cliff
+        latch paths never reach this hook — forward obstacle dominates.
 
         Args:
             vehicle_depth: Current vehicle depth (m).
@@ -742,6 +1013,12 @@ class OccupancyMap:
             self.cmd_depth[self.cx] = max(
                 0.0, vehicle_depth + self.dvl_altitude - c.imaging_altitude
             )
+        elif not self.manifold_observed[self.cx]:
+            # No DVL lock and no real manifold observation at the vehicle column
+            # (grid defaults to bottom depth).  Do not command a dive to the
+            # depth-window floor — that forces ALT_CORRECTION with zero forward
+            # motion.  Hold at current depth until DVL or occupancy sees seafloor.
+            self.cmd_depth[self.cx] = max(0.0, vehicle_depth)
 
         # ----- Step 2a: release latch if past tracked obstacle + margin -----
         if (self._cliff_top_committed
@@ -793,18 +1070,44 @@ class OccupancyMap:
                 self._cliff_top_target_x
                 + c.cliff_standoff + c.vehicle_length + 1.0
             )
+        elif self._cliff_top_committed:
+            # Latch is committed but the narrow window (safety_below_m) found
+            # nothing.  Run a wider scan using imaging_altitude as the depth
+            # threshold to catch terrain between safety_below_m and
+            # imaging_altitude below the vehicle.  Only update target_z (not
+            # target_x or release_x) — extending the release point based on
+            # background flat terrain would delay latch release indefinitely.
+            wide_z, wide_x = self._forward_obstacle(
+                vehicle_depth, vehicle_world_x,
+                z_threshold=vehicle_depth + c.imaging_altitude,
+            )
+            if wide_z is not None:
+                new_target_z = wide_z - c.imaging_altitude
+                if new_target_z < self._cliff_top_target_z:
+                    self._cliff_top_target_z = new_target_z
+                    self._cliff_top_target_x = max(
+                        self._cliff_top_target_x, wide_x
+                    )
+                    self._cliff_top_release_x = (
+                        self._cliff_top_target_x
+                        + c.cliff_standoff + c.vehicle_length + 1.0
+                    )
 
         # ----- Step 2c: apply latch (effective cmd_depth) -----
+        # The latch is inviolable: once committed it overrides ALL other planning
+        # until Step 2a releases it at release_x.  No early release on peak_z=None
+        # — the obstacle may have just exited the detection window while the vehicle
+        # is still well short of release_x.  Always use the committed target depth
+        # exactly (not min with vehicle_depth) so OBSTACLE_HOLD can hold constant
+        # depth while the vehicle flies forward over the obstacle.
         if self._cliff_top_committed:
-            # Vehicle should never descend during avoidance.  Hold at
-            # min(target_z, vehicle_z): if vehicle is deeper than target,
-            # cmd = target (forces ascent via OBSTACLE_CLEAR).  If vehicle
-            # has already overshot shallower than target, cmd = vehicle_z
-            # so dz=0 and vehicle flies forward at its current depth.
-            effective = min(self._cliff_top_target_z, vehicle_depth)
+            effective = self._cliff_top_target_z
             for ix in range(self.cx, self.nx):
                 self.cmd_depth[ix] = effective
             self._set_mode_from_cmd_depth(vehicle_depth)
+            # If vehicle is already at/above target, fly forward at target depth.
+            if self.control_mode != 'OBSTACLE_CLEAR':
+                self.control_mode = 'OBSTACLE_HOLD'
             return
 
         # ----- Step 3: safety tail cap (always active) -----
@@ -813,23 +1116,91 @@ class OccupancyMap:
                 if self.cmd_depth[ix] > vehicle_depth:
                     self.cmd_depth[ix] = vehicle_depth
 
+        # ----- Step 4: propagate vehicle-column depth to unobserved ahead columns -----
+        # Unobserved columns default to grid-bottom manifold depth, which drives
+        # cmd_depth deep.  The motion step interpolates one dt ahead to get its
+        # target_z; without this propagation that look-ahead pulls the vehicle
+        # down even when dvl_altitude correctly commands a climb.  Hold the
+        # vehicle column's cmd_depth where the manifold is not yet observed.
+        for ix in range(self.cx + 1, self.nx):
+            if not self.manifold_observed[ix]:
+                self.cmd_depth[ix] = self.cmd_depth[self.cx]
+
         # ----- Mode selection -----
         self._set_mode_from_cmd_depth(vehicle_depth)
+        # Tail clearance overrides altitude follow / correction only; forward
+        # obstacle latch (early return above) and OBSTACLE_CLEAR are unchanged.
+        if (self._safety_tail_blocked(vehicle_depth)
+                and self.control_mode in ('ALT_FOLLOW', 'ALT_CORRECTION')):
+            self.control_mode = 'TAIL_CLEAR'
 
     def _set_mode_from_cmd_depth(self, vehicle_depth: float):
-        """Pick mode from ``cmd_depth[cx] - vehicle_depth``."""
+        """Pick mode from ``cmd_depth[cx] - vehicle_depth`` using hysteresis.
+
+        ``dz = cmd_depth[cx] - vehicle_depth``: negative means vehicle is deeper
+        than commanded (needs OBSTACLE_CLEAR climb); positive means shallower
+        than commanded (needs ALT_CORRECTION dive).
+
+        Entries from ALT_FOLLOW use ``altitude_overshoot_threshold_m``; exits
+        from OBSTACLE_CLEAR / ALT_CORRECTION use the tighter interior band
+        ``altitude_overshoot_threshold_m - altitude_overshoot_hysteresis_m``.
+        ``altitude_mode_cmd_depth_ema_blend`` optionally low-passes cmd_depth[cx]
+        for this discriminator alone so +/-threshold spikes cannot flip OB/ALT each tick.
+        """
         c = self.cfg
         target_z = self.cmd_depth[self.cx]
         if np.isnan(target_z):
+            self._mode_cmd_smooth_z = None
             self.control_mode = "ALT_FOLLOW"
             return
-        dz = target_z - vehicle_depth
-        if dz < -c.altitude_overshoot_threshold_m:
-            self.control_mode = "OBSTACLE_CLEAR"
-        elif dz > c.altitude_overshoot_threshold_m:
-            self.control_mode = "ALT_CORRECTION"
+
+        beta = float(c.altitude_mode_cmd_depth_ema_blend)
+        beta = float(np.clip(beta, 0.0, 1.0))
+        if beta <= 0.0:
+            cmd_mode = float(target_z)
         else:
-            self.control_mode = "ALT_FOLLOW"
+            rz = float(target_z)
+            if self._mode_cmd_smooth_z is None:
+                cmd_mode = rz
+            else:
+                cmd_mode = beta * rz + (1.0 - beta) * self._mode_cmd_smooth_z
+            self._mode_cmd_smooth_z = cmd_mode
+
+        dz = cmd_mode - float(vehicle_depth)
+        T = float(c.altitude_overshoot_threshold_m)
+        h_raw = float(c.altitude_overshoot_hysteresis_m)
+        h = np.clip(h_raw, 0.0, max(0.0, T - 1e-6))
+        inside = max(0.0, T - h)
+        prev = self.control_mode
+
+        obstacle_clear = (
+            dz <= -T
+            or (prev == "OBSTACLE_CLEAR" and dz < -inside)
+        )
+        altitude_correction = (
+            dz >= T
+            or (prev == "ALT_CORRECTION" and dz > inside)
+        )
+
+        # Forward obstacle dominates when both widen — pick the stronger ascent need.
+        if obstacle_clear and altitude_correction:
+            if dz <= -inside:
+                self.control_mode = "OBSTACLE_CLEAR"
+            elif dz >= inside:
+                self.control_mode = "ALT_CORRECTION"
+            else:
+                self.control_mode = "ALT_FOLLOW"
+            return
+
+        if obstacle_clear:
+            self.control_mode = "OBSTACLE_CLEAR"
+            return
+
+        if altitude_correction:
+            self.control_mode = "ALT_CORRECTION"
+            return
+
+        self.control_mode = "ALT_FOLLOW"
 
     def build_path_waypoints(self) -> list:
         """
@@ -881,17 +1252,63 @@ class OccupancyMap:
     # Full update cycle
     # -------------------------------------------------------------------------
 
-    def update(self, vehicle_depth: float):
-        """
-        Run the full processing pipeline: manifold extraction, path planning,
-        and waypoint generation. Call this after sensor updates and advance().
+    def clear_stale_voxels(self, vehicle_heading: float) -> None:
+        """Reset any observed voxel whose observation heading is too far from current heading.
+
+        ``voxel_heading`` records the vehicle heading at the time of the most
+        recent observation of each voxel, whether that observation was a hit
+        (occupied) or a miss (free).  Any voxel whose stored heading differs
+        from *vehicle_heading* by more than ``stale_heading_threshold_deg`` is
+        reset to prior (unobserved) probability and its heading cleared.
+
+        Exception: occupied voxels in the columns directly under the vehicle
+        footprint have their stored heading refreshed to the current heading
+        instead of being cleared.  These are real terrain observations the
+        vehicle is flying over — discarding them on a heading change would
+        cause the planner to lose the seafloor directly below.  Free voxels
+        under the footprint are still cleared when stale, since a free-space
+        observation from one heading may not hold from another.
 
         Args:
-            vehicle_depth: Current vehicle depth (m).
+            vehicle_heading: Current vehicle heading (radians, same convention
+                             as headings stored by the sensor update methods).
+        """
+        if np.isnan(vehicle_heading):
+            return
+        c = self.cfg
+
+        # Refresh heading for occupied voxels under the vehicle body so they
+        # are never cleared by the stale gate.
+        half_bins = int(np.ceil(c.vehicle_length / (2.0 * c.dx)))
+        ix_lo = max(0, self.cx - half_bins)
+        ix_hi = min(self.nx, self.cx + half_bins + 1)
+        footprint_occupied = self.grid[:, ix_lo:ix_hi] >= c.occ_thresh
+        self.voxel_heading[:, ix_lo:ix_hi][footprint_occupied] = vehicle_heading
+
+        threshold = np.radians(c.stale_heading_threshold_deg)
+        diff = np.abs(self.voxel_heading - vehicle_heading) % (2.0 * np.pi)
+        diff = np.minimum(diff, 2.0 * np.pi - diff)
+        stale = (~np.isnan(self.voxel_heading)) & (diff > threshold)
+        self.grid[stale] = c.prior
+        self.voxel_heading[stale] = np.nan
+
+    def update(self, vehicle_depth: float, vehicle_heading: float = np.nan):
+        """
+        Run the full processing pipeline: stale-voxel clearing, manifold
+        extraction, path planning, and waypoint generation. Call this after
+        sensor updates.
+
+        Args:
+            vehicle_depth:   Current vehicle depth (m).
+            vehicle_heading: Current vehicle heading (radians).  When provided,
+                             occupied voxels whose observation heading differs by
+                             more than ``stale_heading_threshold_deg`` are reset
+                             to prior before planning.
 
         Returns:
             Commanded depth at the vehicle position.
         """
+        self.clear_stale_voxels(vehicle_heading)
         self.build_cliff_manifold()
         self.build_commanded_depth(vehicle_depth)
         self.build_path_waypoints()
@@ -961,9 +1378,14 @@ class OccupancyMap:
         wps = self.path_waypoints[:6]
         wp_str = '  '.join(f'({w[0]:+.1f},{w[1]:.1f})' for w in wps)
 
+        dvl_str = (
+            f"{self.dvl_altitude:.3f}m"
+            if not np.isnan(self.dvl_altitude)
+            else "nan"
+        )
         lines = [
             f"  mode={self.control_mode:<15}  "
-            f"dvl_alt={self.dvl_altitude:.3f}m  target={c.imaging_altitude:.2f}m  "
+            f"dvl_alt={dvl_str}  target={c.imaging_altitude:.2f}m  "
             f"veh_z={vehicle_depth:.3f}m  cmd@cx={cmd[cx]:.3f}m",
             f"  col offset: {hdr}",
             f"  world_x:    {xrow}",
@@ -1001,3 +1423,248 @@ class OccupancyMap:
             'dvl_altitude': float(self.dvl_altitude) if not np.isnan(self.dvl_altitude) else None,
             'control_mode': self.control_mode,
         }
+
+
+# ===========================================================================
+# High-level sensor interface
+# ===========================================================================
+
+class ObstacleMapper:
+    """Thread-safe AUV obstacle avoidance interface.
+
+    Accepts asynchronous sensor measurements from DVL, altimeter, and forward
+    sonar via update_sensor(). Advances the occupancy grid based on the forward
+    displacement between consecutive poses, accounting for vehicle heading.
+
+    Velocity commands suitable for a real AUV controller are returned by
+    get_control(). Vehicle altitude (minimum of last DVL and altimeter vertical
+    readings) is returned by get_altitude().
+
+    The forward sonar origin is at the vehicle nose (vehicle_center +
+    vehicle_length/2). Sonar ranges are measured from that point.
+
+    Args:
+        config:            Occupancy map and path-planning parameters.
+        dvl_config:        DVL beam geometry and max range.
+        sonar_config:      Forward sonar beam width and max range.
+        altimeter_config:  Downward altimeter max range (optional).
+    """
+
+    def __init__(
+        self,
+        config: OccupancyMapConfig,
+        dvl_config: DVLConfig,
+        sonar_config: SonarConfig,
+        altimeter_config: Optional[AltimeterConfig] = None,
+    ):
+        self._omap = OccupancyMap(config)
+        self._dvl_config = dvl_config
+        self._sonar_config = sonar_config
+        self._altimeter_config = altimeter_config or AltimeterConfig()
+        self._lock = threading.Lock()
+        self._last_pose: Optional[Pose] = None
+        self._altimeter_altitude: float = np.nan
+        self._omap.cfg.dvl_max_range_m = dvl_config.max_range
+
+    @property
+    def omap(self) -> OccupancyMap:
+        """Underlying OccupancyMap for visualization and debug access."""
+        return self._omap
+
+    def reset(self, pose: Pose) -> None:
+        """Reset map state, re-centering on the given pose."""
+        with self._lock:
+            self._omap.reset(0.0, pose.depth)
+            self._last_pose = pose
+            self._altimeter_altitude = np.nan
+
+    def update_sensor(
+        self,
+        sensor_type: SensorType,
+        measurement: Union[DVLMeasurement, AltimeterMeasurement, SonarMeasurement],
+        pose: Pose,
+    ) -> None:
+        """Process a sensor measurement at the given vehicle pose.
+
+        Advances the occupancy grid by the forward component of displacement
+        from the previous pose (using the previous pose's heading for
+        projection), applies the sensor observation, and updates the avoidance
+        plan. Thread-safe; safe to call from concurrent sensor callbacks.
+
+        Args:
+            sensor_type:  Which sensor produced the measurement.
+            measurement:  DVLMeasurement, AltimeterMeasurement, or SonarMeasurement.
+            pose:         Current vehicle pose in NED frame.
+        """
+        with self._lock:
+            self._advance_to_pose(pose)
+            fwd_x = self._vehicle_forward_x()
+
+            if sensor_type == SensorType.DVL:
+                self._omap.update_dvl_ray(
+                    measurement.ranges,
+                    self._dvl_config.beam_angles_rad,
+                    pose.depth,
+                    fwd_x,
+                    hit_surface=measurement.hit_surface,
+                    vehicle_heading=pose.heading,
+                )
+
+            elif sensor_type == SensorType.ALTIMETER:
+                valid = (
+                    measurement.hit
+                    and measurement.range_m < self._altimeter_config.max_range - 0.05
+                )
+                self._altimeter_altitude = measurement.range_m if valid else np.nan
+                self._omap.update_altimeter_ray(
+                    measurement.range_m,
+                    pose.depth,
+                    fwd_x,
+                    measurement.hit,
+                    vehicle_heading=pose.heading,
+                )
+
+            elif sensor_type == SensorType.SONAR:
+                nose_x = fwd_x + self._omap.cfg.vehicle_length / 2.0
+                self._omap.update_sonar(
+                    measurement.range_m,
+                    self._sonar_config.half_angle_rad,
+                    pose.depth,
+                    nose_x,
+                    measurement.hit,
+                    vehicle_heading=pose.heading,
+                )
+
+            self._omap.update(pose.depth, pose.heading)
+
+    def update_pose(self, pose: Pose) -> None:
+        """Advance the map to the current vehicle pose and re-run planning.
+
+        Use this at the control rate to keep the map and plan current between
+        sensor firings.  No occupancy data is written — the grid origin shifts
+        via advance() / shift_depth() and the full planning pipeline re-runs
+        (stale clearing, manifold, depth profile, waypoints).
+
+        Safe to call when no sensor has fired yet, or when called in the same
+        step as a sensor update (the zero-displacement advance is a no-op).
+
+        Thread-safe.
+        """
+        with self._lock:
+            self._advance_to_pose(pose)
+            self._omap.update(pose.depth, pose.heading)
+
+    def get_control(self) -> ControlCommand:
+        """Return the current obstacle avoidance command.
+
+        Priority: forward obstacle (OBSTACLE_CLEAR / OBSTACLE_HOLD from latch or
+        below-target ascent) unchanged; tail blocked with ALT_FOLLOW or
+        ALT_CORRECTION → TAIL_CLEAR (survey_speed, DEPTH_HOLD at present depth).
+
+        ALT_FOLLOW / ALT_CORRECTION otherwise:
+            vertical_mode  = 'ALT_FOLLOW'
+            vertical_target = imaging_altitude (m above seafloor)
+            vx             = survey_speed or 0 (ALT_CORRECTION)
+
+        OBSTACLE_CLEAR: DEPTH_HOLD at cmd depth, vx=0 until within band.
+
+        OBSTACLE_HOLD / TAIL_CLEAR: DEPTH_HOLD, vx=survey_speed.
+
+        Thread-safe.
+        """
+        with self._lock:
+            if self._last_pose is None:
+                return ControlCommand(
+                    vx=self._omap.cfg.survey_speed,
+                    vertical_mode='ALT_FOLLOW',
+                    vertical_target=self._omap.cfg.imaging_altitude,
+                )
+            mode = self._omap.control_mode
+            c = self._omap.cfg
+            if mode == 'OBSTACLE_CLEAR':
+                cmd_depth = self._omap.get_commanded_depth_at_vehicle()
+                target_depth = (cmd_depth
+                                if not np.isnan(cmd_depth)
+                                else self._last_pose.depth)
+                dz = target_depth - self._last_pose.depth
+                vx = 0.0 if abs(dz) > 0.1 else c.survey_speed
+                return ControlCommand(
+                    vx=vx,
+                    vertical_mode='DEPTH_HOLD',
+                    vertical_target=target_depth,
+                )
+            if mode == 'OBSTACLE_HOLD':
+                cmd_depth = self._omap.get_commanded_depth_at_vehicle()
+                target_depth = (cmd_depth
+                                if not np.isnan(cmd_depth)
+                                else self._last_pose.depth)
+                return ControlCommand(
+                    vx=c.survey_speed,
+                    vertical_mode='DEPTH_HOLD',
+                    vertical_target=target_depth,
+                )
+            if mode == 'ALT_CORRECTION':
+                return ControlCommand(
+                    vx=0.0,
+                    vertical_mode='ALT_FOLLOW',
+                    vertical_target=c.imaging_altitude,
+                )
+            if mode == 'TAIL_CLEAR':
+                # Constant-depth forward until tail safety band clears;
+                # overrides ALT_FOLLOW / ALT_CORRECTION when not in forward
+                # obstacle ascent (OBSTACLE_CLEAR) or latch hold.
+                return ControlCommand(
+                    vx=c.survey_speed,
+                    vertical_mode='DEPTH_HOLD',
+                    vertical_target=self._last_pose.depth,
+                )
+            # ALT_FOLLOW — altitude controller handles heave
+            return ControlCommand(
+                vx=c.survey_speed,
+                vertical_mode='ALT_FOLLOW',
+                vertical_target=c.imaging_altitude,
+            )
+
+    def get_altitude(self) -> float:
+        """Vehicle altitude above seafloor (m) from the most recent sensor readings.
+
+        Returns the minimum of the last DVL vertical range and the last
+        altimeter range.  Both values are derived directly from sensor
+        measurements and are independent of the voxel map, so this reading
+        remains valid even when the occupancy grid has been cleared by the
+        stale-heading gate.
+
+        Returns NaN when neither sensor has produced a valid return yet.
+        Thread-safe.
+        """
+        with self._lock:
+            candidates = [
+                v for v in (self._omap.dvl_altitude, self._altimeter_altitude)
+                if not np.isnan(v)
+            ]
+            return min(candidates) if candidates else np.nan
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _advance_to_pose(self, pose: Pose) -> None:
+        """Advance the grid to match a new pose. Must be called with lock held."""
+        if self._last_pose is None:
+            self._omap.reset(0.0, pose.depth)
+            self._last_pose = pose
+            return
+        dn = pose.north - self._last_pose.north
+        de = pose.east - self._last_pose.east
+        h = self._last_pose.heading
+        ds = dn * np.cos(h) + de * np.sin(h)
+        if ds > 0.0:
+            self._omap.advance(ds)
+        self._omap.shift_depth(pose.depth)
+        self._last_pose = pose
+
+    def _vehicle_forward_x(self) -> float:
+        """Along-track position of the vehicle in the occupancy map frame."""
+        omap = self._omap
+        return omap.grid_origin_x + omap.cx * omap.cfg.dx + omap._shift_accum
+

@@ -47,8 +47,9 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 100%; }
   body { background: #1a1a1a; color: #c8c8c0; font-family: 'Menlo', 'Consolas', monospace; }
+  /* Reserve space for fixed panel (368px + border) so maps stay visible */
   #wrap { width: 100%; padding: 16px; transition: padding-right 0.22s ease; }
-  #wrap.cfg-open { padding-right: 384px; }
+  #wrap.cfg-open { padding-right: calc(16px + 368px + 1px); }
   h1 { font-size: 16px; font-weight: 400; margin-bottom: 8px; color: #888; }
   .row { display: flex; gap: 12px; align-items: flex-start; }
   canvas { border-radius: 6px; background: #111; display: block; }
@@ -72,6 +73,7 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
     font-size:18px; line-height:32px; text-align:center; }
   #cfgBtn:hover { background:#3a3a3a; color:#ddd; }
   #cfgPanel { position:fixed; top:0; right:-380px; width:368px; height:100vh;
+    box-sizing:border-box;
     background:#181818; border-left:1px solid #2e2e2e;
     transition:right 0.22s ease; z-index:999; overflow-y:auto;
     padding:14px 16px; font-size:12px; }
@@ -104,7 +106,8 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
       <div class="cfg-row">
         <label>Type</label>
         <select id="cfgTerrain3d" onchange="refreshTerrain3dSec()">
-          <option value="default">default</option>
+          <option value="default">random reef (default)</option>
+          <option value="classic">classic — seamount + ridge</option>
           <option value="flat">flat</option>
           <option value="seamount">seamount</option>
           <option value="ridge">ridge</option>
@@ -150,7 +153,7 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
           <option value="arc-left">arc-left</option>
           <option value="arc-right">arc-right</option>
           <option value="circle">circle</option>
-          <option value="lawnmower">lawnmower</option>
+          <option value="lawnmower" selected>lawnmower</option>
         </select>
       </div>
       <div class="cfg-row"><label>Initial heading (&#176;)</label><input type="number" id="cfgHdg" value="0" min="0" max="360" step="5"></div>
@@ -159,9 +162,9 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
         <div class="cfg-row"><label>Arc radius (m)</label><input type="number" id="cfgArcRadius" value="60" min="5" max="500" step="5"></div>
       </div>
       <div id="sec-lawnmower" style="display:none">
-        <div class="cfg-row"><label>Leg length (m)</label><input type="number" id="cfgLegLen" value="120" min="10" max="500" step="10"></div>
-        <div class="cfg-row"><label>Spacing (m)</label><input type="number" id="cfgSpacing" value="20" min="1" max="100" step="1"></div>
-        <div class="cfg-row"><label>Num legs</label><input type="number" id="cfgNLegs" value="5" min="1" max="20" step="1"></div>
+        <div class="cfg-row"><label>Leg length (m)</label><input type="number" id="cfgLegLen" value="20" min="5" max="500" step="1"></div>
+        <div class="cfg-row"><label>Spacing (m)</label><input type="number" id="cfgSpacing" value="7" min="1" max="100" step="1"></div>
+        <div class="cfg-row"><label>Num legs</label><input type="number" id="cfgNLegs" value="20" min="1" max="80" step="1"></div>
         <div class="cfg-row"><label>Mission heading (&#176;)</label><input type="number" id="cfgMissionHdg" placeholder="same as initial" min="0" max="360" step="5"></div>
         <div class="cfg-row"><label>Turn rate (rad/s)</label><input type="number" id="cfgTurnRate" value="0.25" min="0" max="2" step="0.05"></div>
       </div>
@@ -171,8 +174,7 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
     <div class="cfg-row"><label>Imaging alt (m)</label><input type="number" id="cfgImagingAlt" value="2" min="0.5" max="5" step="0.25"></div>
     <div class="cfg-row"><label>Cliff standoff (m)</label><input type="number" id="cfgStandoff" value="2" min="0.5" max="5" step="0.5"></div>
     <div class="cfg-row"><label>Obstacle height thresh (m)</label><input type="number" id="cfgObstThresh" value="1" min="0.1" max="3" step="0.1"></div>
-    <div class="cfg-row"><label>Turn mirror</label><input type="checkbox" id="cfgTurnMirror"></div>
-    <div class="cfg-row"><label>Mirror thresh (°)</label><input type="number" id="cfgMirrorThresh" value="30" min="5" max="180" step="5"></div>
+    <div class="cfg-row"><label>Stale heading thresh (°)</label><input type="number" id="cfgStaleHeading" value="45" min="5" max="180" step="5" title="Voxels observed from a heading more than this many degrees away from the current heading are cleared."></div>
   </div>
   <div class="cfg-sec">
     <h3>Simulation</h3>
@@ -210,9 +212,10 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
              oninput="sendParam('cliff_standoff',+this.value);document.getElementById('soV').textContent=this.value+'m'">
       <span id="soV">2m</span>
     </label>
-    <label title="Mirror filled voxels from behind to ahead when the vehicle turns sharply">Turn mirror
-      <input type="checkbox" id="turnMirrorToggle"
-             onchange="sendParam('turn_voxel_mirror', this.checked)">
+    <label title="Voxels observed from a heading more than this many degrees away are cleared">Stale thresh
+      <input type="range" min="5" max="180" value="45" step="5" id="staleSlider"
+             oninput="sendParam('stale_heading_threshold_deg',+this.value);document.getElementById('staleV').textContent=this.value+'°'">
+      <span id="staleV">45°</span>
     </label>
   </div>
   <div class="stats">
@@ -505,7 +508,7 @@ function drawProfile(s) {
   // Water surface line (z=0) — solid green, drawn if within view
   if (s.z_min <= 0 && s.z_max >= 0) {
     const py0 = (0 - s.z_min) * sz;
-    ctx.strokeStyle = 'rgba(80,200,90,0.9)'; ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(80,200,90,0.9)'; ctx.lineWidth = 4;
     ctx.beginPath(); ctx.moveTo(0, py0); ctx.lineTo(gw, py0); ctx.stroke();
   }
 
@@ -645,16 +648,21 @@ function draw(s) {
   document.getElementById('stCmd').textContent = 'Cmd: ' + s.cmd_depth.toFixed(2) + 'm';
   const modeEl = document.getElementById('stMode');
   modeEl.textContent = 'Mode: ' + (s.control_mode || 'ALT_FOLLOW');
-  const modeColors = { ALT_FOLLOW: '#7ec8a0', OBSTACLE_CLEAR: '#f5a623', ALT_CORRECTION: '#79b8f5' };
+  const modeColors = {
+    ALT_FOLLOW: '#7ec8a0', OBSTACLE_CLEAR: '#f5a623', ALT_CORRECTION: '#79b8f5',
+    OBSTACLE_HOLD: '#c9a227', TAIL_CLEAR: '#b86fd4',
+  };
   modeEl.style.color = modeColors[s.control_mode] || '#999';
   if (s.terrain_label) document.getElementById('stTerrain').textContent = 'Terrain: ' + s.terrain_label;
 }
 
 // --- Configuration panel ---
 function toggleCfg() {
-  document.getElementById('cfgPanel').classList.toggle('open');
+  const panel = document.getElementById('cfgPanel');
   const wrap = document.getElementById('wrap');
-  wrap.classList.toggle('cfg-open');
+  panel.classList.toggle('open');
+  /* Keep wrap padding in lockstep with panel — do not only toggle (Apply used to desync). */
+  wrap.classList.toggle('cfg-open', panel.classList.contains('open'));
   wrap.addEventListener('transitionend', () => { if (latestState) draw(latestState); }, { once: true });
 }
 function refreshTerrain3dSec() {
@@ -706,16 +714,18 @@ function applyConfig() {
     // obstacle avoidance + sim
     imaging_altitude:    +document.getElementById('cfgImagingAlt').value,
     cliff_standoff:      +document.getElementById('cfgStandoff').value,
-    obstacle_threshold:  +document.getElementById('cfgObstThresh').value,
-    turn_voxel_mirror:    document.getElementById('cfgTurnMirror').checked,
-    turn_mirror_threshold: +document.getElementById('cfgMirrorThresh').value,
-    time_accel:          +document.getElementById('cfgTimeAccel').value,
+    obstacle_threshold:        +document.getElementById('cfgObstThresh').value,
+    stale_heading_threshold_deg: +document.getElementById('cfgStaleHeading').value,
+    time_accel:                +document.getElementById('cfgTimeAccel').value,
   };
   ws.send(JSON.stringify(cfg));
   document.getElementById('cfgPanel').classList.remove('open');
+  document.getElementById('wrap').classList.remove('cfg-open');
 }
 
 connect();
+refreshTerrain3dSec();
+refreshTrajSec();
 window.addEventListener('resize', () => { if (latestState) draw(latestState); });
 </script>
 </body>
@@ -780,9 +790,11 @@ class VisualizerServer3D:
         if t == 'canyon':
             w = kw.get('width', 40.0)
             return 0.0, -w, 150.0, w
-        if t == 'default':
-            # Seamount at cx=40, r=15; ridges period=25
+        if t == 'classic':
             return -5.0, -30.0, 60.0, 30.0
+        if t == 'default':
+            # Random reef: extents follow mission path + margins only (no bbox)
+            return None
         return None
 
     def _compute_map_extents(self, mission_path):
@@ -825,8 +837,6 @@ class VisualizerServer3D:
     def _create_sim(self):
         config = OccupancyMapConfig()
         terrain_fn = make_terrain_3d(self.terrain_type, **self.terrain_kwargs)
-        mirror_deg = self._turn_mirror_threshold_deg if hasattr(self, '_turn_mirror_threshold_deg') else 30.0
-        mirror_on  = self._turn_voxel_mirror         if hasattr(self, '_turn_voxel_mirror')         else True
         init_depth = self.initial_depth if hasattr(self, 'initial_depth') else 0.0
         return Simulator3D(
             omap_config=config,
@@ -834,12 +844,13 @@ class VisualizerServer3D:
             trajectory=self.trajectory,
             initial_heading_deg=self.initial_heading_deg,
             initial_depth=init_depth,
-            turn_voxel_mirror=mirror_on,
-            turn_mirror_threshold_deg=mirror_deg,
         )
 
     def _build_terrain_label(self) -> str:
-        label = f"3D/{self.terrain_type}"
+        if self.terrain_type == 'default':
+            label = '3D/random reef'
+        else:
+            label = f"3D/{self.terrain_type}"
         kw = self.terrain_kwargs
         if kw.get('angle_deg'):
             label += f" {kw['angle_deg']:.0f}°"
@@ -1012,9 +1023,9 @@ class VisualizerServer3D:
             traj = ArcTrajectory3D(heading_deg, radius=arc_radius, direction='left')
         elif traj_type == 'lawnmower':
             traj, mission_path = make_lawnmower_trajectory(
-                leg_length=float(data.get('leg_length', 120.0)),
-                spacing=float(data.get('spacing', 20.0)),
-                n_legs=int(data.get('n_legs', 5)),
+                leg_length=float(data.get('leg_length', 20.0)),
+                spacing=float(data.get('spacing', 7.0)),
+                n_legs=int(data.get('n_legs', 20)),
                 orientation_deg=mission_hdg,
                 turn_rate=float(data.get('turn_rate', 0.25)),
                 survey_speed=0.5,
@@ -1030,20 +1041,12 @@ class VisualizerServer3D:
             self._map_ox, self._map_oy = self._compute_map_extents(mission_path)
         self.sim = self._create_sim()
 
-        for key in ('imaging_altitude', 'cliff_standoff', 'obstacle_threshold'):
+        for key in ('imaging_altitude', 'cliff_standoff', 'obstacle_threshold',
+                    'stale_heading_threshold_deg'):
             if key in data:
                 setattr(self.sim.omap.cfg, key, float(data[key]))
         if 'time_accel' in data:
             self.time_accel = int(data['time_accel'])
-        if 'turn_voxel_mirror' in data:
-            self._turn_voxel_mirror = bool(data['turn_voxel_mirror'])
-            if hasattr(self.sim, 'turn_voxel_mirror'):
-                self.sim.turn_voxel_mirror = self._turn_voxel_mirror
-        if 'turn_mirror_threshold' in data:
-            self._turn_mirror_threshold_deg = float(data['turn_mirror_threshold'])
-            if hasattr(self.sim, '_turn_mirror_threshold'):
-                self.sim._turn_mirror_threshold = self._turn_mirror_threshold_deg * np.pi / 180.0
-                self.sim.omap.turn_dh_bins[:] = 0.0
 
     async def sim_loop(self):
         """Main simulation loop — steps sim and broadcasts state."""
@@ -1094,13 +1097,6 @@ class VisualizerServer3D:
                     val = data['value']
                     if key == 'time_accel':
                         self.time_accel = int(val)
-                    elif key == 'turn_voxel_mirror':
-                        if hasattr(self.sim, 'turn_voxel_mirror'):
-                            self.sim.turn_voxel_mirror = bool(val)
-                    elif key == 'turn_mirror_threshold':
-                        if hasattr(self.sim, '_turn_mirror_threshold'):
-                            self.sim._turn_mirror_threshold = float(val) * np.pi / 180.0
-                            self.sim.omap.turn_dh_bins[:] = 0.0
                     elif hasattr(self.sim.omap.cfg, key):
                         setattr(self.sim.omap.cfg, key, float(val))
         finally:
@@ -1170,7 +1166,7 @@ def main():
 
     # --- 3D trajectory ---
     parser.add_argument(
-        '--trajectory', default='straight',
+        '--trajectory', default='lawnmower',
         choices=['straight', 'arc-left', 'arc-right', 'lawnmower', 'circle'],
         help='XY trajectory type (default: %(default)s)',
     )
@@ -1178,11 +1174,11 @@ def main():
         help='Initial heading in degrees (default: %(default)s)')
     parser.add_argument('--arc-radius', type=float, default=60.0, metavar='M',
         help='Arc radius in metres for arc/circle trajectories (default: %(default)s)')
-    parser.add_argument('--leg-length', type=float, default=120.0, metavar='M',
+    parser.add_argument('--leg-length', type=float, default=20.0, metavar='M',
         help='Lawnmower leg length in metres (default: %(default)s)')
-    parser.add_argument('--spacing', type=float, default=20.0, metavar='M',
+    parser.add_argument('--spacing', type=float, default=7.0, metavar='M',
         help='Lawnmower cross-track spacing in metres (default: %(default)s)')
-    parser.add_argument('--n-legs', type=int, default=5, metavar='N',
+    parser.add_argument('--n-legs', type=int, default=20, metavar='N',
         help='Number of lawnmower legs (default: %(default)s)')
     parser.add_argument('--mission-heading', type=float, default=None, metavar='DEG',
         help='Lawnmower leg orientation; defaults to --heading')

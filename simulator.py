@@ -1080,16 +1080,40 @@ class Simulator3D:
         sonar_hz: float = 1.0,
         control_hz: float = 10.0,
         debug: bool = True,
+        use_cpp_backend: bool = False,
     ):
+        # Sensor configs always kept as Python objects (used for ray simulation)
         self.dvl       = dvl_config       or DVLConfig()
         self.sonar     = sonar_config     or SonarConfig()
         self.altimeter = altimeter_config or AltimeterConfig()
-        self.mapper = ObstacleMapper(
-            omap_config or OccupancyMapConfig(),
-            self.dvl,
-            self.sonar,
-            self.altimeter,
-        )
+
+        cfg = omap_config or OccupancyMapConfig()
+        if use_cpp_backend:
+            try:
+                import occupancy_map_cpp as _cpp
+                cpp_cfg = _cpp.OccupancyMapConfig()
+                for attr, val in vars(cfg).items():
+                    if hasattr(cpp_cfg, attr):
+                        setattr(cpp_cfg, attr, val)
+                self.mapper = _cpp.ObstacleMapper(
+                    cpp_cfg, _cpp.DVLConfig(), _cpp.SonarConfig(), _cpp.AltimeterConfig()
+                )
+                self._Pose               = _cpp.Pose
+                self._SensorType         = _cpp.SensorType
+                self._DVLMeasurement     = _cpp.DVLMeasurement
+                self._AltimeterMeasurement = _cpp.AltimeterMeasurement
+                self._SonarMeasurement   = _cpp.SonarMeasurement
+                self._backend            = 'cpp'
+            except ImportError:
+                use_cpp_backend = False
+        if not use_cpp_backend:
+            self.mapper = ObstacleMapper(cfg, self.dvl, self.sonar, self.altimeter)
+            self._Pose               = Pose
+            self._SensorType         = SensorType
+            self._DVLMeasurement     = DVLMeasurement
+            self._AltimeterMeasurement = AltimeterMeasurement
+            self._SonarMeasurement   = SonarMeasurement
+            self._backend            = 'python'
         self._dvl_period   = 1.0 / dvl_hz
         self._alt_period   = 1.0 / altimeter_hz
         self._sonar_period = 1.0 / sonar_hz
@@ -1113,7 +1137,7 @@ class Simulator3D:
         self._ctrl_vx: float = 0.0   # forward speed (m/s)
         self._ctrl_vz: float = 0.0   # heave rate (m/s, positive = dive)
 
-        self.mapper.reset(Pose(
+        self.mapper.reset(self._Pose(
             north=initial_x, east=initial_y,
             depth=initial_depth, heading=self.vehicle_heading,
         ))
@@ -1293,7 +1317,7 @@ class Simulator3D:
         )
 
         # 3. Pose from updated state
-        pose = Pose(
+        pose = self._Pose(
             north=self.vehicle_x, east=self.vehicle_y,
             depth=self.vehicle_z, heading=self.vehicle_heading,
         )
@@ -1302,18 +1326,21 @@ class Simulator3D:
         if self.time >= self._dvl_last_t + self._dvl_period:
             dvl_ranges, dvl_hits, dvl_hit_xy = self._simulate_dvl()
             self.dvl_hit_xy = dvl_hit_xy
-            self.mapper.update_sensor(SensorType.DVL, DVLMeasurement(dvl_ranges, dvl_hits), pose)
+            self.mapper.update_sensor(
+                self._SensorType.DVL, self._DVLMeasurement(dvl_ranges, dvl_hits), pose)
             self._dvl_last_t += self._dvl_period
 
         if self.time >= self._alt_last_t + self._alt_period:
             alt_range, alt_hit = self._simulate_altimeter()
-            self.mapper.update_sensor(SensorType.ALTIMETER, AltimeterMeasurement(alt_range, alt_hit), pose)
+            self.mapper.update_sensor(
+                self._SensorType.ALTIMETER, self._AltimeterMeasurement(alt_range, alt_hit), pose)
             self._alt_last_t += self._alt_period
 
         if self.time >= self._sonar_last_t + self._sonar_period:
             sonar_range, sonar_hit, sonar_hit_xy = self._simulate_sonar()
             self.sonar_hit_xy = sonar_hit_xy
-            self.mapper.update_sensor(SensorType.SONAR, SonarMeasurement(sonar_range, sonar_hit), pose)
+            self.mapper.update_sensor(
+                self._SensorType.SONAR, self._SonarMeasurement(sonar_range, sonar_hit), pose)
             self._sonar_last_t += self._sonar_period
 
         # 5. Control tick — runs at control_hz, independent of sensor rates

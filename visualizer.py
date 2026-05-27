@@ -180,6 +180,9 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
     <h3>Simulation</h3>
     <div class="cfg-row"><label>Backend</label><select id="cfgBackend"><option value="python">Python</option><option value="cpp">C++</option></select></div>
     <div class="cfg-row"><label>Time accel</label><input type="number" id="cfgTimeAccel" value="1" min="1" max="20" step="1"></div>
+    <div class="cfg-row cfg-check"><label>DVL</label><input type="checkbox" id="cfgEnableDvl" checked onchange="sendSensorToggle('enable_dvl', this.checked)"></div>
+    <div class="cfg-row cfg-check"><label>Altimeter</label><input type="checkbox" id="cfgEnableAlt" checked onchange="sendSensorToggle('enable_altimeter', this.checked)"></div>
+    <div class="cfg-row cfg-check"><label>Sonar</label><input type="checkbox" id="cfgEnableSonar" checked onchange="sendSensorToggle('enable_sonar', this.checked)"></div>
   </div>
   <button id="applyBtn" onclick="applyConfig()">Apply &amp; Restart</button>
 </div>
@@ -281,6 +284,9 @@ function togglePlay() {
 
 function sendParam(key, val) {
   ws.send(JSON.stringify({ cmd: 'param', key, value: val }));
+}
+function sendSensorToggle(key, enabled) {
+  ws.send(JSON.stringify({ cmd: 'param', key, value: !!enabled }));
 }
 
 // ---- Top-down terrain map rendering ----
@@ -567,22 +573,25 @@ function drawProfile(s) {
     ctx.stroke();
   }
 
-  // Path waypoints
-  const wp = s.path_waypoints;
-  if (wp && wp.length > 1) {
-    ctx.strokeStyle = 'rgba(100,220,255,0.75)'; ctx.lineWidth = 2; ctx.beginPath();
-    for (let i = 0; i < wp.length; i++) {
-      const px = (wp[i][0] - viewLeft) * sx;
-      const pz = (wp[i][1] - s.z_min) * sz;
-      if (i === 0) ctx.moveTo(px, pz); else ctx.lineTo(px, pz);
-    }
-    ctx.stroke();
-  }
-
-  // AUV
+  // AUV dimensions
   const auvPxZ   = (s.vehicle_z - s.z_min) * sz;
   const auvPxLen = s.vehicle_length * sx;
   const auvPxH   = Math.max(6, 0.3 * sz);
+
+  // Path waypoints — begin at the vehicle's actual current depth so any
+  // in-place vertical transit (OBSTACLE_CLEAR ascent, ALT_CORRECTION descent)
+  // is visible as a vertical segment before the forward planned route.
+  const wp = s.path_waypoints;
+  if (wp && wp.length > 0) {
+    ctx.strokeStyle = 'rgba(100,220,255,0.75)'; ctx.lineWidth = 2; ctx.beginPath();
+    ctx.moveTo(vehPx, auvPxZ);
+    for (let i = 0; i < wp.length; i++) {
+      const px = (wp[i][0] - viewLeft) * sx;
+      const pz = (wp[i][1] - s.z_min) * sz;
+      ctx.lineTo(px, pz);
+    }
+    ctx.stroke();
+  }
 
   // DVL beams – Nortek Nucleus 1000 (same angles as profile view above)
   ctx.strokeStyle = 'rgba(90,160,90,0.55)'; ctx.lineWidth = 0.8;
@@ -721,6 +730,9 @@ function applyConfig() {
     stale_heading_threshold_deg: +document.getElementById('cfgStaleHeading').value,
     time_accel:                +document.getElementById('cfgTimeAccel').value,
     backend:                    document.getElementById('cfgBackend').value,
+    enable_dvl:                 document.getElementById('cfgEnableDvl').checked,
+    enable_altimeter:           document.getElementById('cfgEnableAlt').checked,
+    enable_sonar:               document.getElementById('cfgEnableSonar').checked,
   };
   ws.send(JSON.stringify(cfg));
   document.getElementById('cfgPanel').classList.remove('open');
@@ -762,6 +774,9 @@ class VisualizerServer3D:
         use_cpp_backend: bool = False,
     ):
         self.use_cpp_backend     = use_cpp_backend
+        self.enable_dvl          = True
+        self.enable_altimeter    = True
+        self.enable_sonar        = True
         self.http_port           = http_port
         self.ws_port             = ws_port
         self.dt                  = dt
@@ -851,6 +866,9 @@ class VisualizerServer3D:
             initial_heading_deg=self.initial_heading_deg,
             initial_depth=init_depth,
             use_cpp_backend=self.use_cpp_backend,
+            enable_dvl=self.enable_dvl,
+            enable_altimeter=self.enable_altimeter,
+            enable_sonar=self.enable_sonar,
         )
 
     def _build_terrain_label(self) -> str:
@@ -962,6 +980,9 @@ class VisualizerServer3D:
             'dvl_hit_xy':   [list(p) if p is not None else None
                              for p in sim.dvl_hit_xy],
             'sonar_hit_xy': list(sim.sonar_hit_xy) if sim.sonar_hit_xy else None,
+            'enable_dvl': sim.enable_dvl,
+            'enable_altimeter': sim.enable_altimeter,
+            'enable_sonar': sim.enable_sonar,
         }
         return json.dumps(state)
 
@@ -1047,16 +1068,24 @@ class VisualizerServer3D:
         self.mission_path        = mission_path
         self._map_nx, self._map_ny, self._map_dx, self._map_dy, \
             self._map_ox, self._map_oy = self._compute_map_extents(mission_path)
-        self.sim = self._create_sim()
 
         if 'backend' in data:
             self.use_cpp_backend = (data['backend'] == 'cpp')
+        for key in ('enable_dvl', 'enable_altimeter', 'enable_sonar'):
+            if key in data:
+                setattr(self, key, bool(data[key]))
+
+        self.sim = self._create_sim()
+
         for key in ('imaging_altitude', 'cliff_standoff', 'obstacle_threshold',
                     'stale_heading_threshold_deg'):
             if key in data:
                 setattr(self.sim.omap.cfg, key, float(data[key]))
         if 'time_accel' in data:
             self.time_accel = int(data['time_accel'])
+        for key in ('enable_dvl', 'enable_altimeter', 'enable_sonar'):
+            if key in data and not bool(data[key]):
+                self.sim.clear_sensor_reading(key.replace('enable_', ''))
 
     async def sim_loop(self):
         """Main simulation loop — steps sim and broadcasts state."""
@@ -1107,6 +1136,13 @@ class VisualizerServer3D:
                     val = data['value']
                     if key == 'time_accel':
                         self.time_accel = int(val)
+                    elif key in ('enable_dvl', 'enable_altimeter', 'enable_sonar'):
+                        enabled = bool(val)
+                        setattr(self, key, enabled)
+                        setattr(self.sim, key, enabled)
+                        if not enabled:
+                            self.sim.clear_sensor_reading(
+                                key.replace('enable_', ''))
                     elif hasattr(self.sim.omap.cfg, key):
                         setattr(self.sim.omap.cfg, key, float(val))
         finally:

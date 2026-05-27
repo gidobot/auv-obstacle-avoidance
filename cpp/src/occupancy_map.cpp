@@ -71,7 +71,6 @@ OccupancyMap::OccupancyMap(const OccupancyMapConfig& cfg)
     cliff_top_target_z_  = kNaN;
     cliff_top_target_x_  = kNaN;
     cliff_top_release_x_ = kNaN;
-    mode_cmd_smooth_z_   = std::nullopt;
 }
 
 void OccupancyMap::reset(double vehicle_world_x, double vehicle_depth) {
@@ -98,7 +97,6 @@ void OccupancyMap::reset(double vehicle_world_x, double vehicle_depth) {
     cliff_top_target_z_  = kNaN;
     cliff_top_target_x_  = kNaN;
     cliff_top_release_x_ = kNaN;
-    mode_cmd_smooth_z_   = std::nullopt;
 }
 
 // ===========================================================================
@@ -480,28 +478,11 @@ void OccupancyMap::set_mode_from_cmd_depth(double vehicle_depth) {
     double target_z = cmd_depth_[cx_];
 
     if (std::isnan(target_z)) {
-        mode_cmd_smooth_z_ = std::nullopt;
-        control_mode_      = "ALT_FOLLOW";
+        control_mode_ = "ALT_FOLLOW";
         return;
     }
 
-    double beta = static_cast<double>(c.altitude_mode_cmd_depth_ema_blend);
-    beta = std::max(0.0, std::min(1.0, beta));
-
-    double cmd_mode;
-    if (beta <= 0.0) {
-        cmd_mode = static_cast<double>(target_z);
-    } else {
-        double rz = static_cast<double>(target_z);
-        if (!mode_cmd_smooth_z_.has_value()) {
-            cmd_mode = rz;
-        } else {
-            cmd_mode = beta * rz + (1.0 - beta) * (*mode_cmd_smooth_z_);
-        }
-        mode_cmd_smooth_z_ = cmd_mode;
-    }
-
-    double dz    = cmd_mode - static_cast<double>(vehicle_depth);
+    double dz = target_z - vehicle_depth;
     double T     = static_cast<double>(c.altitude_overshoot_threshold_m);
     double h_raw = static_cast<double>(c.altitude_overshoot_hysteresis_m);
     double h     = std::max(0.0, std::min(h_raw, std::max(0.0, T - 1e-6)));
@@ -550,9 +531,12 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
             cmd_depth_[ix] = std::max(0.0, z - c.imaging_altitude);
         }
     }
-    // Vehicle column override
+    // Vehicle column override — DVL can deepen cmd_depth (early descent on
+    // rising terrain) but must not shallow it; a cliff-wall hit producing a
+    // tiny dvl_altitude must not create a spurious OBSTACLE_CLEAR ascent.
     if (!std::isnan(dvl_altitude_)) {
-        cmd_depth_[cx_] = std::max(0.0, vehicle_depth + dvl_altitude_ - c.imaging_altitude);
+        double dvl_cmd = std::max(0.0, vehicle_depth + dvl_altitude_ - c.imaging_altitude);
+        cmd_depth_[cx_] = std::max(dvl_cmd, cmd_depth_[cx_]);
     } else if (!manifold_observed_[cx_]) {
         cmd_depth_[cx_] = std::max(0.0, vehicle_depth);
     }
@@ -963,7 +947,9 @@ ControlCommand ObstacleMapper::get_control() {
         return {c.survey_speed, "DEPTH_HOLD", target_depth};
     }
     if (mode == "ALT_CORRECTION") {
-        return {0.0, "ALT_FOLLOW", c.imaging_altitude};
+        double cmd_depth = omap_.get_commanded_depth_at_vehicle();
+        double target = (!std::isnan(cmd_depth)) ? cmd_depth : last_pose_->depth;
+        return {0.0, "DEPTH_HOLD", target};
     }
     if (mode == "TAIL_CLEAR") {
         return {c.survey_speed, "DEPTH_HOLD", last_pose_->depth};

@@ -256,12 +256,6 @@ class OccupancyMapConfig:
     # (common on procedural / rugose reef terrain).
     altitude_overshoot_hysteresis_m: float = 0.5
 
-    # Low-pass blend for mode selection ONLY: ``cmd_mode = β·cmd_raw + (1-β)·cmd_mode``.
-    # ``cmd_depth[cx]`` and DEPTH_HOLD targets stay instantaneous; hysteresis+EMA operate
-    # on cmd_mode for OBSTACLE_CLEAR vs ALT_CORRECTION so reef/raster noise cannot flip
-    # ``dz`` past ±threshold every planner tick.  β=0 disables (raw cmd_depth).
-    altitude_mode_cmd_depth_ema_blend: float = 0.22
-
     # Stale-observation heading gate.  Any occupied voxel whose stored
     # observation heading differs from the current vehicle heading by more
     # than this threshold is reset to prior probability.  Prevents filled
@@ -283,8 +277,8 @@ class OccupancyMapConfig:
     occ_thresh: float = 0.62      # Threshold to consider a voxel occupied
 
     # DVL observation model
-    dvl_hit_prob: float = 0.2     # P(occupied | hit) increment
-    dvl_miss_prob: float = 0.1    # P(free | miss) decrement
+    dvl_hit_prob: float = 0.5     # P(occupied | hit) increment
+    dvl_miss_prob: float = 0.3    # P(free | miss) decrement
     dvl_max_occ: float = 0.98     # Max occupancy from DVL
     dvl_min_occ: float = 0.02     # Min occupancy from DVL
     # Instrument max range (m): nadir fallback in update_dvl_ray when range
@@ -292,14 +286,14 @@ class OccupancyMapConfig:
     dvl_max_range_m: float = 50.0
 
     # Altimeter observation model
-    altimeter_hit_prob: float = 0.2   # P(occupied | hit) increment
-    altimeter_miss_prob: float = 0.1  # P(free | miss) decrement
+    altimeter_hit_prob: float = 0.5   # P(occupied | hit) increment
+    altimeter_miss_prob: float = 0.3  # P(free | miss) decrement
     altimeter_max_occ: float = 0.98   # Max occupancy from altimeter
     altimeter_min_occ: float = 0.02   # Min occupancy from altimeter
 
     # Forward sonar observation model
-    sonar_hit_prob: float = 0.2   # P(occupied | hit) increment
-    sonar_miss_prob: float = 0.1  # P(free | miss) decrement
+    sonar_hit_prob: float = 0.3   # P(occupied | hit) increment
+    sonar_miss_prob: float = 0.2  # P(free | miss) decrement
     sonar_max_occ: float = 0.98   # Max occupancy from sonar
     sonar_min_occ: float = 0.02   # Min occupancy from sonar
 
@@ -408,8 +402,6 @@ class OccupancyMap:
         self._cliff_top_target_x: float = np.nan  # ratchets forward only
         self._cliff_top_release_x: float = np.nan
 
-        # Single-column low-pass depth used only inside _set_mode_from_cmd_depth.
-        self._mode_cmd_smooth_z: Optional[float] = None
 
     def reset(self, vehicle_world_x: float = 0.0, vehicle_depth: float = 0.0):
         """Reset the grid to prior probability and re-center on vehicle."""
@@ -432,7 +424,6 @@ class OccupancyMap:
         self._cliff_top_target_z = np.nan
         self._cliff_top_target_x = np.nan
         self._cliff_top_release_x = np.nan
-        self._mode_cmd_smooth_z = None
 
     # -------------------------------------------------------------------------
     # Coordinate transforms
@@ -1010,9 +1001,8 @@ class OccupancyMap:
         # forward-look).  Janus forward hit on rising terrain becomes the
         # altitude signal, giving earliest descent response.
         if not np.isnan(self.dvl_altitude):
-            self.cmd_depth[self.cx] = max(
-                0.0, vehicle_depth + self.dvl_altitude - c.imaging_altitude
-            )
+            dvl_cmd = max(0.0, vehicle_depth + self.dvl_altitude - c.imaging_altitude)
+            self.cmd_depth[self.cx] = max(dvl_cmd, self.cmd_depth[self.cx])
         elif not self.manifold_observed[self.cx]:
             # No DVL lock and no real manifold observation at the vehicle column
             # (grid defaults to bottom depth).  Do not command a dive to the
@@ -1144,29 +1134,14 @@ class OccupancyMap:
         Entries from ALT_FOLLOW use ``altitude_overshoot_threshold_m``; exits
         from OBSTACLE_CLEAR / ALT_CORRECTION use the tighter interior band
         ``altitude_overshoot_threshold_m - altitude_overshoot_hysteresis_m``.
-        ``altitude_mode_cmd_depth_ema_blend`` optionally low-passes cmd_depth[cx]
-        for this discriminator alone so +/-threshold spikes cannot flip OB/ALT each tick.
         """
         c = self.cfg
         target_z = self.cmd_depth[self.cx]
         if np.isnan(target_z):
-            self._mode_cmd_smooth_z = None
             self.control_mode = "ALT_FOLLOW"
             return
 
-        beta = float(c.altitude_mode_cmd_depth_ema_blend)
-        beta = float(np.clip(beta, 0.0, 1.0))
-        if beta <= 0.0:
-            cmd_mode = float(target_z)
-        else:
-            rz = float(target_z)
-            if self._mode_cmd_smooth_z is None:
-                cmd_mode = rz
-            else:
-                cmd_mode = beta * rz + (1.0 - beta) * self._mode_cmd_smooth_z
-            self._mode_cmd_smooth_z = cmd_mode
-
-        dz = cmd_mode - float(vehicle_depth)
+        dz = float(target_z) - float(vehicle_depth)
         T = float(c.altitude_overshoot_threshold_m)
         h_raw = float(c.altitude_overshoot_hysteresis_m)
         h = np.clip(h_raw, 0.0, max(0.0, T - 1e-6))
@@ -1604,10 +1579,14 @@ class ObstacleMapper:
                     vertical_target=target_depth,
                 )
             if mode == 'ALT_CORRECTION':
+                cmd_depth = self._omap.get_commanded_depth_at_vehicle()
+                target = (cmd_depth
+                          if not np.isnan(cmd_depth)
+                          else self._last_pose.depth)
                 return ControlCommand(
                     vx=0.0,
-                    vertical_mode='ALT_FOLLOW',
-                    vertical_target=c.imaging_altitude,
+                    vertical_mode='DEPTH_HOLD',
+                    vertical_target=target,
                 )
             if mode == 'TAIL_CLEAR':
                 # Constant-depth forward until tail safety band clears;

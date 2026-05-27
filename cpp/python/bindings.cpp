@@ -61,7 +61,6 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
         .def_readwrite("obstacle_threshold",    &OccupancyMapConfig::obstacle_threshold)
         .def_readwrite("altitude_overshoot_threshold_m",  &OccupancyMapConfig::altitude_overshoot_threshold_m)
         .def_readwrite("altitude_overshoot_hysteresis_m", &OccupancyMapConfig::altitude_overshoot_hysteresis_m)
-        .def_readwrite("altitude_mode_cmd_depth_ema_blend", &OccupancyMapConfig::altitude_mode_cmd_depth_ema_blend)
         .def_readwrite("stale_heading_threshold_deg", &OccupancyMapConfig::stale_heading_threshold_deg)
         // Safety clearance
         .def_readwrite("safety_standoff_m",  &OccupancyMapConfig::safety_standoff_m)

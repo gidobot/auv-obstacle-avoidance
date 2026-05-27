@@ -209,7 +209,13 @@ class Simulator:
         sonar_hz: float = 1.0,
         control_hz: float = 10.0,
         debug: bool = True,
+        enable_dvl: bool = True,
+        enable_altimeter: bool = True,
+        enable_sonar: bool = True,
     ):
+        self.enable_dvl = enable_dvl
+        self.enable_altimeter = enable_altimeter
+        self.enable_sonar = enable_sonar
         self.dvl = dvl_config or DVLConfig()
         self.sonar = sonar_config or SonarConfig()
         self.altimeter = altimeter_config or AltimeterConfig()
@@ -344,19 +350,28 @@ class Simulator:
 
         # 3. Sensor callbacks with accurate pose
         if self.time >= self._dvl_last_t + self._dvl_period:
-            dvl_ranges, dvl_hits = self._simulate_dvl()
-            self.mapper.update_sensor(SensorType.DVL, DVLMeasurement(dvl_ranges, dvl_hits), pose)
             self._dvl_last_t += self._dvl_period
+            if self.enable_dvl:
+                dvl_ranges, dvl_hits = self._simulate_dvl()
+                self.mapper.update_sensor(
+                    SensorType.DVL, DVLMeasurement(dvl_ranges, dvl_hits), pose)
 
         if self.time >= self._alt_last_t + self._alt_period:
-            alt_range, alt_hit = self._simulate_altimeter()
-            self.mapper.update_sensor(SensorType.ALTIMETER, AltimeterMeasurement(alt_range, alt_hit), pose)
             self._alt_last_t += self._alt_period
+            if self.enable_altimeter:
+                alt_range, alt_hit = self._simulate_altimeter()
+                self.mapper.update_sensor(
+                    SensorType.ALTIMETER,
+                    AltimeterMeasurement(alt_range, alt_hit),
+                    pose,
+                )
 
         if self.time >= self._sonar_last_t + self._sonar_period:
-            sonar_range, sonar_hit = self._simulate_sonar()
-            self.mapper.update_sensor(SensorType.SONAR, SonarMeasurement(sonar_range, sonar_hit), pose)
             self._sonar_last_t += self._sonar_period
+            if self.enable_sonar:
+                sonar_range, sonar_hit = self._simulate_sonar()
+                self.mapper.update_sensor(
+                    SensorType.SONAR, SonarMeasurement(sonar_range, sonar_hit), pose)
 
         # 4. Control tick — runs at control_hz, independent of sensor rates
         if self.time >= self._ctrl_last_t + self._ctrl_period:
@@ -626,8 +641,11 @@ def make_terrain_3d_random_reef(
     reef_grid_ylim: tuple[float, float] | None = None,
 ) -> Callable[[float, float], float]:
     """Procedural reef-like bathymetry: bommies, terraces / cliff-like faults,
-    low-frequency swell, and high rugosity (local rises and falls of typically
-    2-3 m over horizontal scales of roughly 1-5 m mixed with larger structure).
+    low-frequency swell, and rugosity (local rises and falls of typically
+    2-3 m over horizontal scales of roughly 2-10 m mixed with larger structure).
+
+    Peak features use ~2× wider spatial scales than the original reef preset so
+    bommies and texture read smoother and less spiky at a given grid resolution.
 
     Each call draws a fresh realisation unless *seed* is fixed. Typical use is
     the ``default`` 3-D terrain preset for varied obstacle-avoidance stress.
@@ -655,18 +673,21 @@ def make_terrain_3d_random_reef(
     X, Y = np.meshgrid(xs, ys, indexing='ij')
     Z = np.full(X.shape, float(base_depth), dtype=np.float64)
 
+    # Horizontal scale for peaks / texture (2× original → smoother, less spiky).
+    peak_scale = 2.0
+
     # ------- Long swell (overall slope envelope) --------
-    swell_k = rng.uniform(np.pi / 220.0, np.pi / 75.0, size=(4, 2))
+    swell_k = rng.uniform(np.pi / 220.0, np.pi / 75.0, size=(4, 2)) / peak_scale
     swell_a = rng.uniform(2.0, 7.5, size=4)
     swell_p = rng.uniform(0.0, 2.0 * np.pi, size=4)
 
-    mid_k = rng.uniform(np.pi / 76.0, np.pi / 22.0, size=(7, 2))
+    mid_k = rng.uniform(np.pi / 76.0, np.pi / 22.0, size=(7, 2)) / peak_scale
     mid_a = rng.uniform(1.5, 5.8, size=7)
     mid_p = rng.uniform(0.0, 2.0 * np.pi, size=7)
 
     # ------- Rugosity: multiple bands for reef-like texture --------
     nk = int(rng.integers(28, 46))
-    L = rng.uniform(1.0, 6.8, size=nk)
+    L = rng.uniform(1.0, 6.8, size=nk) * peak_scale
     ang = rng.uniform(0.0, 2.0 * np.pi, size=nk)
     rk_kx = (2.0 * np.pi / L) * np.cos(ang)
     rk_ky = (2.0 * np.pi / L) * np.sin(ang)
@@ -674,7 +695,7 @@ def make_terrain_3d_random_reef(
     rk_p = rng.uniform(0.0, 2.0 * np.pi, size=nk)
 
     nk2 = int(rng.integers(18, 30))
-    L2 = rng.uniform(1.05, 3.95, size=nk2)
+    L2 = rng.uniform(1.05, 3.95, size=nk2) * peak_scale
     ang2 = rng.uniform(0.0, 2.0 * np.pi, size=nk2)
     rk2_kx = (2.0 * np.pi / L2) * np.cos(ang2)
     rk2_ky = (2.0 * np.pi / L2) * np.sin(ang2)
@@ -685,8 +706,8 @@ def make_terrain_3d_random_reef(
     n_bom = int(rng.integers(21, 40))
     bx = rng.uniform(-25.0, 220.0, size=n_bom)
     by = rng.uniform(-90.0, 90.0, size=n_bom)
-    b_wx = rng.uniform(2.2, 17.5, size=n_bom)
-    b_wy = rng.uniform(2.2, 14.8, size=n_bom)
+    b_wx = rng.uniform(2.2, 17.5, size=n_bom) * peak_scale
+    b_wy = rng.uniform(2.2, 14.8, size=n_bom) * peak_scale
     b_rot = rng.uniform(0.0, np.pi, size=n_bom)
     b_h = rng.uniform(2.0, 16.8, size=n_bom)
 
@@ -694,7 +715,7 @@ def make_terrain_3d_random_reef(
     n_hole = int(rng.integers(6, 15))
     hx = rng.uniform(-20.0, 210.0, size=n_hole)
     hy = rng.uniform(-75.0, 75.0, size=n_hole)
-    h_w = rng.uniform(5.6, 32.0, size=n_hole)
+    h_w = rng.uniform(5.6, 32.0, size=n_hole) * peak_scale
     h_d = rng.uniform(2.0, 12.8, size=n_hole)
 
     # ------- Near-sheer terrace / cliff faults across the scene --------
@@ -705,7 +726,7 @@ def make_terrain_3d_random_reef(
     f_nx = np.cos(fh)
     f_ny = np.sin(fh)
     f_drop = rng.uniform(3.5, 12.9, size=n_fault)
-    f_sharp = rng.uniform(22.0, 120.0, size=n_fault)
+    f_sharp = rng.uniform(22.0, 120.0, size=n_fault) / peak_scale
     f_sg = rng.uniform(0.0, 3.14159, size=n_fault)
 
     # --- Vector accumulation on grid ---
@@ -1081,7 +1102,13 @@ class Simulator3D:
         control_hz: float = 10.0,
         debug: bool = True,
         use_cpp_backend: bool = False,
+        enable_dvl: bool = True,
+        enable_altimeter: bool = True,
+        enable_sonar: bool = True,
     ):
+        self.enable_dvl = enable_dvl
+        self.enable_altimeter = enable_altimeter
+        self.enable_sonar = enable_sonar
         # Sensor configs always kept as Python objects (used for ray simulation)
         self.dvl       = dvl_config       or DVLConfig()
         self.sonar     = sonar_config     or SonarConfig()
@@ -1158,6 +1185,18 @@ class Simulator3D:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def clear_sensor_reading(self, sensor: str) -> None:
+        """Drop cached mapper altitude and footprint for a disabled sensor."""
+        if sensor == 'dvl':
+            self.dvl_hit_xy = [None] * len(self.dvl_hit_xy)
+            if self._backend == 'python':
+                self.mapper.omap.dvl_altitude = np.nan
+        elif sensor == 'altimeter':
+            if self._backend == 'python':
+                self.mapper._altimeter_altitude = np.nan
+        elif sensor == 'sonar':
+            self.sonar_hit_xy = None
 
     @property
     def omap(self):
@@ -1324,24 +1363,37 @@ class Simulator3D:
 
         # 4. Sensor callbacks with accurate pose
         if self.time >= self._dvl_last_t + self._dvl_period:
-            dvl_ranges, dvl_hits, dvl_hit_xy = self._simulate_dvl()
-            self.dvl_hit_xy = dvl_hit_xy
-            self.mapper.update_sensor(
-                self._SensorType.DVL, self._DVLMeasurement(dvl_ranges, dvl_hits), pose)
             self._dvl_last_t += self._dvl_period
+            if self.enable_dvl:
+                dvl_ranges, dvl_hits, dvl_hit_xy = self._simulate_dvl()
+                self.dvl_hit_xy = dvl_hit_xy
+                self.mapper.update_sensor(
+                    self._SensorType.DVL, self._DVLMeasurement(dvl_ranges, dvl_hits), pose)
+            else:
+                self.dvl_hit_xy = [None] * len(self.dvl_hit_xy)
 
         if self.time >= self._alt_last_t + self._alt_period:
-            alt_range, alt_hit = self._simulate_altimeter()
-            self.mapper.update_sensor(
-                self._SensorType.ALTIMETER, self._AltimeterMeasurement(alt_range, alt_hit), pose)
             self._alt_last_t += self._alt_period
+            if self.enable_altimeter:
+                alt_range, alt_hit = self._simulate_altimeter()
+                self.mapper.update_sensor(
+                    self._SensorType.ALTIMETER,
+                    self._AltimeterMeasurement(alt_range, alt_hit),
+                    pose,
+                )
 
         if self.time >= self._sonar_last_t + self._sonar_period:
-            sonar_range, sonar_hit, sonar_hit_xy = self._simulate_sonar()
-            self.sonar_hit_xy = sonar_hit_xy
-            self.mapper.update_sensor(
-                self._SensorType.SONAR, self._SonarMeasurement(sonar_range, sonar_hit), pose)
             self._sonar_last_t += self._sonar_period
+            if self.enable_sonar:
+                sonar_range, sonar_hit, sonar_hit_xy = self._simulate_sonar()
+                self.sonar_hit_xy = sonar_hit_xy
+                self.mapper.update_sensor(
+                    self._SensorType.SONAR,
+                    self._SonarMeasurement(sonar_range, sonar_hit),
+                    pose,
+                )
+            else:
+                self.sonar_hit_xy = None
 
         # 5. Control tick — runs at control_hz, independent of sensor rates
         if self.time >= self._ctrl_last_t + self._ctrl_period:

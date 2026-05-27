@@ -85,7 +85,6 @@ struct OccupancyMapConfig {
 
     double altitude_overshoot_threshold_m  = 1.0;
     double altitude_overshoot_hysteresis_m = 0.5;
-    double altitude_mode_cmd_depth_ema_blend = 0.22;
 
     // Stale-observation heading gate
     double stale_heading_threshold_deg = 45.0;
@@ -99,21 +98,21 @@ struct OccupancyMapConfig {
     double occ_thresh  = 0.62;
 
     // DVL observation model
-    double dvl_hit_prob   = 0.2;
-    double dvl_miss_prob  = 0.1;
+    double dvl_hit_prob   = 0.5;
+    double dvl_miss_prob  = 0.3;
     double dvl_max_occ    = 0.98;
     double dvl_min_occ    = 0.02;
     double dvl_max_range_m = 50.0;
 
     // Altimeter observation model
-    double altimeter_hit_prob  = 0.2;
-    double altimeter_miss_prob = 0.1;
+    double altimeter_hit_prob  = 0.5;
+    double altimeter_miss_prob = 0.3;
     double altimeter_max_occ   = 0.98;
     double altimeter_min_occ   = 0.02;
 
     // Forward sonar observation model
-    double sonar_hit_prob  = 0.2;
-    double sonar_miss_prob = 0.1;
+    double sonar_hit_prob  = 0.3;
+    double sonar_miss_prob = 0.2;
     double sonar_max_occ   = 0.98;
     double sonar_min_occ   = 0.02;
 };
@@ -246,9 +245,6 @@ private:
     double cliff_top_target_z_;
     double cliff_top_target_x_;
     double cliff_top_release_x_;
-
-    // EMA state for mode discriminator
-    std::optional<double> mode_cmd_smooth_z_;
 
     // ---- Internal helpers ----
     bool in_bounds(int ix, int iz) const {

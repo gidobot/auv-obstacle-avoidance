@@ -34,6 +34,12 @@ struct DVLConfig {
     /// Unit vectors per beam in vehicle frame (forward, starboard, down).
     /// Returns n_beams × 3 matrix.
     Eigen::MatrixXd beam_directions_3d() const;
+
+    /// True for beams whose 3-D direction lies in the vehicle X-Z plane
+    /// (no lateral/starboard displacement). Only these beams may clear voxels
+    /// in the 2-D occupancy grid; sideways beams would incorrectly clear
+    /// voxels they never actually passed through in 3-D space.
+    std::vector<bool> beam_can_clear() const;
 };
 
 struct SonarConfig {
@@ -165,7 +171,8 @@ public:
         double vehicle_world_x,
         const std::optional<std::vector<bool>>& hit_surface = std::nullopt,
         double range_step    = 0.15,
-        double vehicle_heading = kNaN);
+        double vehicle_heading = kNaN,
+        const std::optional<std::vector<bool>>& can_clear = std::nullopt);
 
     void update_altimeter_ray(
         double range_m,

@@ -37,6 +37,18 @@ Eigen::MatrixXd DVLConfig::beam_directions_3d() const {
     return dirs;
 }
 
+std::vector<bool> DVLConfig::beam_can_clear() const {
+    std::vector<bool> result;
+    result.reserve(beams.size());
+    for (auto& [slant_deg, h_off_deg] : beams) {
+        double s = slant_deg  * M_PI / 180.0;
+        double h = h_off_deg  * M_PI / 180.0;
+        double lateral = std::sin(s) * std::sin(h); // starboard component
+        result.push_back(std::abs(lateral) < 1e-9);
+    }
+    return result;
+}
+
 // ===========================================================================
 // OccupancyMap — construction & reset
 // ===========================================================================
@@ -202,35 +214,43 @@ void OccupancyMap::update_dvl_ray(
     double vehicle_world_x,
     const std::optional<std::vector<bool>>& hit_surface,
     double range_step,
-    double vehicle_heading)
+    double vehicle_heading,
+    const std::optional<std::vector<bool>>& can_clear)
 {
     if (beam_angles.size() != ranges.size())
         throw std::invalid_argument("update_dvl_ray: beam_angles and ranges must be the same length");
     if (hit_surface.has_value() && hit_surface->size() != ranges.size())
         throw std::invalid_argument("update_dvl_ray: hit_surface must be the same length as ranges");
+    if (can_clear.has_value() && can_clear->size() != ranges.size())
+        throw std::invalid_argument("update_dvl_ray: can_clear must be the same length as ranges");
 
     const auto& c = cfg_;
     int n = static_cast<int>(ranges.size());
 
     for (int i = 0; i < n; ++i) {
-        double r_max = ranges[i];
-        double ang   = beam_angles[i];
+        double r_max     = ranges[i];
+        double ang       = beam_angles[i];
+        bool   is_hit    = !hit_surface.has_value() || (*hit_surface)[i];
+        bool   allow_clear = !can_clear.has_value() || (*can_clear)[i];
 
-        bool is_hit = !hit_surface.has_value() || (*hit_surface)[i];
-
-        // Ray-march free cells along beam
-        for (double r = range_step; r < r_max - range_step; r += range_step) {
-            double dx = std::sin(ang) * r;
-            double dz = std::cos(ang) * r;
-            auto [ix, iz] = world_to_grid(vehicle_world_x + dx, vehicle_depth + dz);
-            if (!in_bounds(ix, iz)) continue;
-            grid_(iz, ix) = std::max(c.dvl_min_occ, grid_(iz, ix) - c.dvl_miss_prob);
-            if (grid_(iz, ix) <= c.occ_thresh) {
-                voxel_heading_(iz, ix) = vehicle_heading;
+        // Ray-march free cells — axis-aligned beams only.
+        // Lateral beams travel through different 3-D voxels than their 2-D
+        // projection implies; clearing along their projected path would
+        // incorrectly free voxels the beam never actually passed through.
+        if (allow_clear) {
+            for (double r = range_step; r < r_max - range_step; r += range_step) {
+                double dx = std::sin(ang) * r;
+                double dz = std::cos(ang) * r;
+                auto [ix, iz] = world_to_grid(vehicle_world_x + dx, vehicle_depth + dz);
+                if (!in_bounds(ix, iz)) continue;
+                grid_(iz, ix) = std::max(c.dvl_min_occ, grid_(iz, ix) - c.dvl_miss_prob);
+                if (grid_(iz, ix) <= c.occ_thresh) {
+                    voxel_heading_(iz, ix) = vehicle_heading;
+                }
             }
         }
 
-        // Endpoint
+        // Endpoint: always mark hit occupied; only clear on miss if axis-aligned.
         double dx = std::sin(ang) * r_max;
         double dz = std::cos(ang) * r_max;
         auto [ix, iz] = world_to_grid(vehicle_world_x + dx, vehicle_depth + dz);
@@ -242,7 +262,7 @@ void OccupancyMap::update_dvl_ray(
             if (!was_occupied) {
                 voxel_heading_(iz, ix) = vehicle_heading;
             }
-        } else {
+        } else if (allow_clear) {
             grid_(iz, ix) = std::max(c.dvl_min_occ, grid_(iz, ix) - c.dvl_miss_prob);
             voxel_heading_(iz, ix) = vehicle_heading;
         }
@@ -896,10 +916,12 @@ void ObstacleMapper::update_sensor(SensorType /*type*/, const DVLMeasurement& me
     std::lock_guard<std::mutex> guard(lock_);
     advance_to_pose(pose);
     double fwd_x  = vehicle_forward_x();
-    auto   angles = dvl_config_.beam_angles_rad();
+    auto angles    = dvl_config_.beam_angles_rad();
+    auto can_clear = dvl_config_.beam_can_clear();
     omap_.update_dvl_ray(meas.ranges, angles, pose.depth, fwd_x,
                          std::optional<std::vector<bool>>(meas.hit_surface),
-                         0.15, pose.heading);
+                         0.15, pose.heading,
+                         std::optional<std::vector<bool>>(can_clear));
     omap_.update(pose.depth, pose.heading);
 }
 

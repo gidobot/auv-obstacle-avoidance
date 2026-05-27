@@ -106,6 +106,10 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
             [](const DVLConfig& self) -> Eigen::MatrixXd {
                 return self.beam_directions_3d();
             })
+        .def_property_readonly("beam_can_clear",
+            [](const DVLConfig& self) {
+                return vec_bool_to_numpy(self.beam_can_clear());
+            })
     ;
 
     // -----------------------------------------------------------------------
@@ -234,7 +238,8 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
                double vehicle_world_x,
                py::object hit_surface_obj,
                double range_step,
-               double vehicle_heading)
+               double vehicle_heading,
+               py::object can_clear_obj)
             {
                 auto r = ranges_arr.unchecked<1>();
                 auto a = beam_angles_arr.unchecked<1>();
@@ -245,9 +250,10 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
                 for (py::ssize_t i = 0; i < a.shape(0); ++i)
                     angles[static_cast<size_t>(i)] = a[i];
 
-                auto hit_opt = obj_to_opt_bool(hit_surface_obj);
+                auto hit_opt   = obj_to_opt_bool(hit_surface_obj);
+                auto clear_opt = obj_to_opt_bool(can_clear_obj);
                 self.update_dvl_ray(ranges, angles, vehicle_depth, vehicle_world_x,
-                                    hit_opt, range_step, vehicle_heading);
+                                    hit_opt, range_step, vehicle_heading, clear_opt);
             },
             py::arg("ranges"),
             py::arg("beam_angles"),
@@ -255,7 +261,8 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
             py::arg("vehicle_world_x"),
             py::arg("hit_surface") = py::none(),
             py::arg("range_step") = 0.15,
-            py::arg("vehicle_heading") = kNaN)
+            py::arg("vehicle_heading") = kNaN,
+            py::arg("can_clear") = py::none())
 
         .def("update_altimeter_ray", &OccupancyMap::update_altimeter_ray,
              py::arg("range_m"), py::arg("vehicle_depth"), py::arg("vehicle_world_x"),

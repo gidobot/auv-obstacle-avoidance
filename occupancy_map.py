@@ -124,6 +124,19 @@ class DVLConfig:
                          np.cos(s)))
         return np.array(dirs)
 
+    @property
+    def beam_can_clear(self) -> np.ndarray:
+        """Boolean array: True for beams whose 3-D direction lies in the
+        vehicle X-Z plane (no lateral/starboard displacement).
+
+        Only axis-aligned beams may clear voxels in the 2-D occupancy grid.
+        Sideways beams travel through different 3-D voxels than their 2-D
+        projection implies, so clearing along their projected path would
+        incorrectly free voxels the beam never actually passed through.
+        """
+        dirs = self.beam_directions_3d
+        return np.abs(dirs[:, 1]) < 1e-9
+
 
 @dataclass
 class SonarConfig:
@@ -574,6 +587,7 @@ class OccupancyMap:
         hit_surface: Optional[np.ndarray] = None,
         range_step: float = 0.15,
         vehicle_heading: float = np.nan,
+        can_clear: Optional[np.ndarray] = None,
     ):
         """
         Update occupancy by ray-marching each DVL beam, and track direct altitude.
@@ -615,24 +629,28 @@ class OccupancyMap:
         for i in range(len(ranges)):
             r_max = ranges[i]
             ang = beam_angles[i]
-
-            # A beam that did not hit real terrain is a max-range return.
-            # Treat the entire beam path (including the endpoint) as free space.
             is_hit = (hit_surface is None) or bool(hit_surface[i])
+            allow_clear = (can_clear is None) or bool(can_clear[i])
 
-            r = range_step
-            while r < r_max - range_step:
-                dx = np.sin(ang) * r
-                dz = np.cos(ang) * r
-                ix, iz = self.world_to_grid(vehicle_world_x + dx,
-                                            vehicle_depth + dz)
-                if self._in_bounds(ix, iz):
-                    self.grid[iz, ix] = max(c.dvl_min_occ,
-                                            self.grid[iz, ix] - c.dvl_miss_prob)
-                    if self.grid[iz, ix] <= c.occ_thresh:
-                        self.voxel_heading[iz, ix] = vehicle_heading
-                r += range_step
+            # Ray-march free cells — axis-aligned beams only.
+            # Lateral beams travel through different 3-D voxels than their 2-D
+            # projection implies; clearing along their projected path would
+            # incorrectly free voxels the beam never actually passed through.
+            if allow_clear:
+                r = range_step
+                while r < r_max - range_step:
+                    dx = np.sin(ang) * r
+                    dz = np.cos(ang) * r
+                    ix, iz = self.world_to_grid(vehicle_world_x + dx,
+                                                vehicle_depth + dz)
+                    if self._in_bounds(ix, iz):
+                        self.grid[iz, ix] = max(c.dvl_min_occ,
+                                                self.grid[iz, ix] - c.dvl_miss_prob)
+                        if self.grid[iz, ix] <= c.occ_thresh:
+                            self.voxel_heading[iz, ix] = vehicle_heading
+                    r += range_step
 
+            # Endpoint: always mark hit occupied; only clear on miss if axis-aligned.
             dx = np.sin(ang) * r_max
             dz = np.cos(ang) * r_max
             ix, iz = self.world_to_grid(vehicle_world_x + dx,
@@ -644,8 +662,7 @@ class OccupancyMap:
                                             self.grid[iz, ix] + c.dvl_hit_prob)
                     if not was_occupied:
                         self.voxel_heading[iz, ix] = vehicle_heading
-                else:
-                    # No real return — end of beam is also free.
+                elif allow_clear:
                     self.grid[iz, ix] = max(c.dvl_min_occ,
                                             self.grid[iz, ix] - c.dvl_miss_prob)
                     self.voxel_heading[iz, ix] = vehicle_heading
@@ -1483,6 +1500,7 @@ class ObstacleMapper:
                     fwd_x,
                     hit_surface=measurement.hit_surface,
                     vehicle_heading=pose.heading,
+                    can_clear=self._dvl_config.beam_can_clear,
                 )
 
             elif sensor_type == SensorType.ALTIMETER:

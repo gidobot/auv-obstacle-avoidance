@@ -44,6 +44,9 @@ Eigen::MatrixXd DVLConfig::beam_directions_3d() const {
 OccupancyMap::OccupancyMap(const OccupancyMapConfig& cfg)
     : cfg_(cfg)
 {
+    if (cfg_.dx <= 0.0 || cfg_.dz <= 0.0)
+        throw std::invalid_argument("OccupancyMapConfig: dx and dz must be positive");
+
     nx_ = static_cast<int>(std::ceil((cfg_.horizon_fwd + cfg_.horizon_back) / cfg_.dx));
     nz_ = static_cast<int>(std::ceil(2.0 * cfg_.z_half_range / cfg_.dz));
     cx_ = static_cast<int>(std::floor(cfg_.horizon_back / cfg_.dx));
@@ -201,6 +204,11 @@ void OccupancyMap::update_dvl_ray(
     double range_step,
     double vehicle_heading)
 {
+    if (beam_angles.size() != ranges.size())
+        throw std::invalid_argument("update_dvl_ray: beam_angles and ranges must be the same length");
+    if (hit_surface.has_value() && hit_surface->size() != ranges.size())
+        throw std::invalid_argument("update_dvl_ray: hit_surface must be the same length as ranges");
+
     const auto& c = cfg_;
     int n = static_cast<int>(ranges.size());
 

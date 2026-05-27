@@ -173,6 +173,8 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
         .def(py::init([](py::array_t<double> ranges_arr, py::array_t<bool> hit_arr) {
             auto r = ranges_arr.unchecked<1>();
             auto h = hit_arr.unchecked<1>();
+            if (r.shape(0) != h.shape(0))
+                throw std::invalid_argument("DVLMeasurement: ranges and hit_surface must be the same length");
             DVLMeasurement m;
             m.ranges.resize(static_cast<size_t>(r.shape(0)));
             m.hit_surface.resize(static_cast<size_t>(h.shape(0)));

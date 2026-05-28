@@ -25,7 +25,7 @@ struct DVLConfig {
         {20.0, 120.0},
         {20.0, 240.0},
     };
-    double max_range = 50.0;
+    double max_range = 25.0;
 
     /// 2-D projected angle from vertical for each beam (rad).
     /// atan2(sin(slant)*cos(heading_offset), cos(slant))
@@ -43,7 +43,7 @@ struct DVLConfig {
 };
 
 struct SonarConfig {
-    double max_range  = 12.0;
+    double max_range  = 20.0;
     double half_angle = 3.0;   // half beam width (degrees)
     double noise_std  = 0.3;   // range measurement noise std (m)
 
@@ -51,7 +51,7 @@ struct SonarConfig {
 };
 
 struct AltimeterConfig {
-    double max_range = 100.0;
+    double max_range = 25.0;
 };
 
 struct Pose {

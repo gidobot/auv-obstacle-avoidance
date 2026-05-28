@@ -20,7 +20,6 @@ static constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 struct DVLConfig {
     /// Each entry: {slant_angle_deg, heading_offset_deg}
     std::vector<std::pair<double, double>> beams = {
-        {0.0,   0.0},
         {20.0,  0.0},
         {20.0, 120.0},
         {20.0, 240.0},

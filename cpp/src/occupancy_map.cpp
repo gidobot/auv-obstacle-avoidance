@@ -277,13 +277,6 @@ void OccupancyMap::update_dvl_ray(
                 if (vert < min_vert) min_vert = vert;
             }
         }
-        // Nadir fallback: valid altimeter range before max range, but no hit flag.
-        if (std::isinf(min_vert) && n > 0 && !beam_angles.empty()) {
-            double r0 = ranges[0];
-            if (r0 < c.dvl_max_range_m - 0.05) {
-                min_vert = r0 * std::cos(beam_angles[0]);
-            }
-        }
         dvl_altitude_ = std::isinf(min_vert) ? kNaN : min_vert;
     }
 }

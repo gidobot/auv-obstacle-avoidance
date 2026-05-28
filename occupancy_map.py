@@ -88,7 +88,6 @@ class DVLConfig:
     Default: Nortek Nucleus 1000 — 1 altimeter + 3 Janus beams at 20° slant.
     """
     beams: list = field(default_factory=lambda: [
-        ( 0.0,   0.0),   # altimeter: straight down
         (20.0,   0.0),   # beam 1: forward-down
         (20.0, 120.0),   # beam 2: right-rear-down
         (20.0, 240.0),   # beam 3: left-rear-down
@@ -676,14 +675,6 @@ class OccupancyMap:
                     vert = ranges[i] * np.cos(beam_angles[i])
                     if vert < min_vert:
                         min_vert = vert
-            # Nadir fallback: valid altimeter range before max range, but no
-            # beam flagged as a hit (replay / driver mismatch).  Still trust
-            # the vertical range component so altitude-following does not drop
-            # out while the nadir return is usable.
-            if min_vert >= np.inf and len(ranges) > 0 and len(beam_angles) > 0:
-                r0 = ranges[0]
-                if r0 < c.dvl_max_range_m - 0.05:
-                    min_vert = r0 * np.cos(beam_angles[0])
             if min_vert < np.inf:
                 self.dvl_altitude = min_vert
             else:

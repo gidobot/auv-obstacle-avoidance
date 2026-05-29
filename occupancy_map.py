@@ -308,6 +308,7 @@ class OccupancyMapConfig:
     sonar_miss_prob: float = 0.2  # P(free | miss) decrement
     sonar_max_occ: float = 0.98   # Max occupancy from sonar
     sonar_min_occ: float = 0.02   # Min occupancy from sonar
+    sonar_min_depth_m: float = 1.0  # Ignore sonar returns when vehicle depth < this (surface reflection rejection)
 
 
 class OccupancyMap:
@@ -753,6 +754,8 @@ class OccupancyMap:
             angle_steps: Number of angular samples across the beam.
         """
         c = self.cfg
+        if vehicle_depth < c.sonar_min_depth_m:
+            return
         angles = np.linspace(-sonar_half_angle, sonar_half_angle, angle_steps)
 
         for ang in angles:

@@ -120,6 +120,7 @@ struct OccupancyMapConfig {
     double sonar_miss_prob = 0.2;
     double sonar_max_occ   = 0.98;
     double sonar_min_occ   = 0.02;
+    double sonar_min_depth_m = 1.0; ///< Ignore sonar returns when vehicle depth < this (surface reflection rejection)
 };
 
 // ---------------------------------------------------------------------------

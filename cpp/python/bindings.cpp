@@ -80,10 +80,11 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
         .def_readwrite("altimeter_max_occ",   &OccupancyMapConfig::altimeter_max_occ)
         .def_readwrite("altimeter_min_occ",   &OccupancyMapConfig::altimeter_min_occ)
         // Sonar model
-        .def_readwrite("sonar_hit_prob",  &OccupancyMapConfig::sonar_hit_prob)
-        .def_readwrite("sonar_miss_prob", &OccupancyMapConfig::sonar_miss_prob)
-        .def_readwrite("sonar_max_occ",   &OccupancyMapConfig::sonar_max_occ)
-        .def_readwrite("sonar_min_occ",   &OccupancyMapConfig::sonar_min_occ)
+        .def_readwrite("sonar_hit_prob",    &OccupancyMapConfig::sonar_hit_prob)
+        .def_readwrite("sonar_miss_prob",   &OccupancyMapConfig::sonar_miss_prob)
+        .def_readwrite("sonar_max_occ",     &OccupancyMapConfig::sonar_max_occ)
+        .def_readwrite("sonar_min_occ",     &OccupancyMapConfig::sonar_min_occ)
+        .def_readwrite("sonar_min_depth_m", &OccupancyMapConfig::sonar_min_depth_m)
     ;
 
     // -----------------------------------------------------------------------

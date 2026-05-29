@@ -328,6 +328,7 @@ void OccupancyMap::update_sonar(
     double vehicle_heading)
 {
     const auto& c = cfg_;
+    if (vehicle_depth < c.sonar_min_depth_m) return;
 
     // Generate angular samples across beam (matches np.linspace)
     std::vector<double> angles(angle_steps);

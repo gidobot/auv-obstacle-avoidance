@@ -239,7 +239,15 @@ function makeLayout(tm) {
         ticktext:  [tm.maxZ.toFixed(0), ((tm.minZ+tm.maxZ)/2).toFixed(0),
                     tm.minZ.toFixed(0), '0 m'],
       },
-      aspectmode: 'manual', aspectratio: { x: 1.4, y: 1.4, z: 0.35 },
+      // Scale North and East proportionally to their actual extents so that
+      // 1 m North == 1 m East regardless of the survey area shape.
+      aspectmode: 'manual',
+      aspectratio: (function() {
+        const Lx = tm.nx * tm.dx;          // North extent (m)
+        const Ly = tm.ny * tm.dy;          // East extent (m)
+        const base = Math.max(Lx, Ly);     // normalise to larger dimension
+        return { x: Lx / base, y: Ly / base, z: 0.35 };
+      })(),
       camera: { eye: { x: 1.5, y: -1.5, z: 0.9 }, up: { x: 0, y: 0, z: 1 } },
     },
   };

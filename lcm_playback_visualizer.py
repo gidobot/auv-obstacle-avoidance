@@ -76,6 +76,219 @@ try:
 except ImportError:
     HTML_CLIENT_3D = "<html><body>visualizer.py not found</body></html>"
 
+# ---------------------------------------------------------------------------
+# Interactive 3D terrain viewer (Plotly surface, served at /3d)
+# %%WS_PORT%% is replaced with the actual WebSocket port at startup.
+# ---------------------------------------------------------------------------
+_HTML_3D = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AUV 3D Terrain</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#111; color:#ccc; font-family:'Menlo','Consolas',monospace; overflow:hidden; }
+  #plot { width:100vw; height:100vh; }
+  #hud { position:fixed; bottom:10px; left:12px; font-size:11px; color:#666;
+         pointer-events:none; line-height:1.6; }
+  #loading { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+             font-size:13px; color:#555; }
+</style>
+</head>
+<body>
+<div id="loading">Loading Plotly…</div>
+<div id="plot"></div>
+<div id="hud"></div>
+<script src="https://cdn.plot.ly/plotly-2.35.0.min.js"
+        onerror="document.getElementById('loading').textContent='Plotly CDN unavailable — check internet connection.'">
+</script>
+<script>
+const WS_URL = 'ws://localhost:%%WS_PORT%%';
+let terrainMap = null, plotReady = false;
+let trail = [];
+
+// ---------------------------------------------------------------------------
+// Interaction guard — all Plotly updates are deferred while the user has a
+// mouse button held down.  This prevents Plotly's WebGL redraw from snapping
+// the camera back mid-drag.
+// ---------------------------------------------------------------------------
+let interacting = false;
+let pendingTerrainUpdate = false;   // true = terrain needs restyle on mouseup
+let pendingVehicleUpdate = false;   // true = vehicle/trail need restyle on mouseup
+
+window.addEventListener('mousedown',  () => { interacting = true;  });
+window.addEventListener('touchstart', () => { interacting = true;  }, { passive: true });
+window.addEventListener('mouseup',    () => { interacting = false; flushPending(); });
+window.addEventListener('touchend',   () => { interacting = false; flushPending(); });
+
+function flushPending() {
+  if (!plotReady) return;
+  if (pendingTerrainUpdate) { pendingTerrainUpdate = false; applyTerrainRestyle(); }
+  if (pendingVehicleUpdate) { pendingVehicleUpdate = false; applyVehicleRestyle(); }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket
+// ---------------------------------------------------------------------------
+function connect() {
+  const ws = new WebSocket(WS_URL);
+  ws.onopen  = () => setHud('Connected — waiting for terrain data…');
+  ws.onclose = () => { setHud('Disconnected — retrying…'); setTimeout(connect, 2000); };
+  ws.onerror = () => {};
+  ws.onmessage = (e) => {
+    let msg; try { msg = JSON.parse(e.data); } catch { return; }
+    if (msg.type === 'terrain_map') {
+      terrainMap = msg;
+      if (!plotReady) { initPlot(); return; }
+      if (interacting) { pendingTerrainUpdate = true; }
+      else             { applyTerrainRestyle(); }
+      updateHud();
+    } else if (msg.vehicle_wx !== undefined && plotReady) {
+      trail.push([msg.vehicle_wx, msg.vehicle_y, -msg.vehicle_z]);
+      if (trail.length > 400) trail.shift();
+      if (interacting) { pendingVehicleUpdate = true; }
+      else             { applyVehicleRestyle(); }
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Z-grid helpers
+// ---------------------------------------------------------------------------
+function buildZGrid(tm) {
+  const rows = [];
+  for (let iy = 0; iy < tm.ny; iy++) {
+    const row = [];
+    for (let ix = 0; ix < tm.nx; ix++) {
+      const v = tm.data[iy * tm.nx + ix];
+      row.push(v === null ? null : -v);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Traces
+// ---------------------------------------------------------------------------
+function surfaceTrace(tm) {
+  const xArr = Array.from({length: tm.nx}, (_, i) => tm.ox + (i + 0.5) * tm.dx);
+  const yArr = Array.from({length: tm.ny}, (_, i) => tm.oy + (i + 0.5) * tm.dy);
+  return {
+    type: 'surface', x: xArr, y: yArr, z: buildZGrid(tm),
+    colorscale: 'Viridis', reversescale: false,
+    cmin: -tm.maxZ, cmax: -tm.minZ,
+    showscale: true,
+    colorbar: {
+      title: { text: 'Depth (m)', font: { color: '#999', size: 11 } },
+      tickvals: [-tm.maxZ, -(tm.minZ + tm.maxZ) / 2, -tm.minZ],
+      ticktext: [tm.maxZ.toFixed(0) + ' m',
+                 ((tm.minZ + tm.maxZ) / 2).toFixed(0) + ' m',
+                 tm.minZ.toFixed(0) + ' m'],
+      tickfont: { color: '#888', size: 10 },
+      bgcolor: '#111', bordercolor: '#333',
+      len: 0.55, x: 1.01, thickness: 14,
+    },
+    connectgaps: false,
+    lighting:      { ambient: 0.7, diffuse: 0.6, roughness: 0.5, specular: 0.05 },
+    lightposition: { x: 1, y: 0, z: 2 },
+    name: 'Seafloor',
+    hovertemplate: 'N %{x:.1f} m  E %{y:.1f} m<br>Depth: %{customdata:.1f} m<extra></extra>',
+    customdata: buildZGrid(tm).map(r => r.map(v => v === null ? null : -v)),
+  };
+}
+function trailTrace() {
+  return {
+    type: 'scatter3d', mode: 'lines',
+    x: trail.map(p=>p[0]), y: trail.map(p=>p[1]), z: trail.map(p=>p[2]),
+    line: { color: 'rgba(255,255,255,0.45)', width: 2 },
+    hoverinfo: 'skip', showlegend: false, name: 'Trail',
+  };
+}
+function vehicleTrace() {
+  const p = trail.length ? trail[trail.length-1] : [0,0,0];
+  return {
+    type: 'scatter3d', mode: 'markers',
+    x: [p[0]], y: [p[1]], z: [p[2]],
+    marker: { color: '#F0997B', size: 7, line: { color: '#D85A30', width: 1.5 } },
+    showlegend: false, name: 'AUV',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Layout (used only once at init — never re-applied so camera is preserved)
+// ---------------------------------------------------------------------------
+function makeLayout(tm) {
+  return {
+    paper_bgcolor: '#111', plot_bgcolor: '#111',
+    font:   { color: '#ccc', family: "'Menlo','Consolas',monospace" },
+    margin: { l: 0, r: 80, t: 36, b: 0 },
+    title:  { text: 'Seafloor Terrain — LCM Playback',
+              font: { color: '#666', size: 12 }, x: 0.46 },
+    scene: {
+      bgcolor: '#0b1622',
+      xaxis: { title: 'North (m)', color: '#555', gridcolor: '#1d2d3d',
+               zerolinecolor: '#2a3a4a', showspikes: false },
+      yaxis: { title: 'East (m)',  color: '#555', gridcolor: '#1d2d3d',
+               zerolinecolor: '#2a3a4a', showspikes: false },
+      zaxis: {
+        title: 'Depth (m)', color: '#555', gridcolor: '#1d2d3d',
+        zerolinecolor: '#2a3a4a', showspikes: false,
+        autorange: false, range: [-(tm.maxZ + 3), 3],
+        tickvals:  [-tm.maxZ, -(tm.minZ + tm.maxZ) / 2, -tm.minZ, 0],
+        ticktext:  [tm.maxZ.toFixed(0), ((tm.minZ+tm.maxZ)/2).toFixed(0),
+                    tm.minZ.toFixed(0), '0 m'],
+      },
+      aspectmode: 'manual', aspectratio: { x: 1.4, y: 1.4, z: 0.35 },
+      camera: { eye: { x: 1.5, y: -1.5, z: 0.9 }, up: { x: 0, y: 0, z: 1 } },
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Init (first terrain_map received)
+// ---------------------------------------------------------------------------
+function initPlot() {
+  document.getElementById('loading').style.display = 'none';
+  Plotly.newPlot('plot',
+    [surfaceTrace(terrainMap), trailTrace(), vehicleTrace()],
+    makeLayout(terrainMap),
+    { responsive: true, displaylogo: false,
+      modeBarButtonsToRemove: ['resetCameraLastSave3d'] });
+  plotReady = true;
+  updateHud();
+}
+
+// ---------------------------------------------------------------------------
+// Incremental updates — called only when NOT interacting
+// ---------------------------------------------------------------------------
+function applyTerrainRestyle() {
+  const tm = terrainMap;
+  Plotly.restyle('plot', { z: [buildZGrid(tm)], cmin: [-tm.maxZ], cmax: [-tm.minZ] }, [0]);
+}
+function applyVehicleRestyle() {
+  Plotly.restyle('plot', {
+    x: [trail.map(p=>p[0])], y: [trail.map(p=>p[1])], z: [trail.map(p=>p[2])],
+  }, [1]);
+  const p = trail[trail.length-1];
+  Plotly.restyle('plot', { x: [[p[0]]], y: [[p[1]]], z: [[p[2]]] }, [2]);
+}
+
+function updateHud() {
+  if (!terrainMap) return;
+  const filled = terrainMap.data.filter(v => v !== null).length;
+  const pct    = (100 * filled / terrainMap.data.length).toFixed(1);
+  setHud(`Grid ${terrainMap.nx}×${terrainMap.ny}  ·  ${filled} cells (${pct}% explored)`
+       + `  ·  depth ${terrainMap.minZ.toFixed(1)}–${terrainMap.maxZ.toFixed(1)} m`);
+}
+function setHud(txt) { document.getElementById('hud').textContent = txt; }
+
+connect();
+</script>
+</body>
+</html>
+"""
+
 try:
     import websockets
 except ImportError:
@@ -780,15 +993,25 @@ class PlaybackServer:
                 "      if (z == null) { r = g = b = 35; }\n"
                 "      else { [r, g, b] = depthToRgb(z, minZ, maxZ); }"
             )
+            # Add 3D map button after Reset
+            .replace(
+                r"""<button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>""",
+                r"""<button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>"""
+                "\n    "
+                r"""<button onclick="window.open('/3d','_blank')" title="Open interactive 3D terrain map">3D Map ↗</button>"""
+            )
         ).encode()
+
+        html_3d = _HTML_3D.replace('%%WS_PORT%%', str(self.ws_port)).encode()
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self_):
+                content = html_3d if self_.path.startswith('/3d') else client_html
                 self_.send_response(200)
                 self_.send_header('Content-Type', 'text/html')
                 self_.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
                 self_.end_headers()
-                self_.wfile.write(client_html)
+                self_.wfile.write(content)
 
             def log_message(self_, fmt, *args):
                 pass

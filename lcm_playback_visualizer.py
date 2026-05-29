@@ -184,6 +184,7 @@ class PlaybackServer:
         ws_port: int = 8083,
         initial_speed: float = 1.0,
         swap_xy: bool = False,
+        use_cpp_backend: bool = False,
         lcm_types_path: str = _DEFAULT_LCM_TYPES_PATH,
     ):
         self.events = events
@@ -206,15 +207,45 @@ class PlaybackServer:
         # Clients
         self.clients: set = set()
 
-        # Sensor configs — Nortek Nucleus 1000 3-beam + ISA500 defaults
+        # Python DVLConfig kept for beam-geometry hit-XY visualisation regardless of backend
         self._dvl_cfg = DVLConfig()
-        self._sonar_cfg = SonarConfig()
-        self._alt_cfg = AltimeterConfig()
 
-        # ObstacleMapper
+        # Build mapper and store backend-specific type constructors
         omap_cfg = OccupancyMapConfig()
-        self.mapper = ObstacleMapper(omap_cfg, self._dvl_cfg,
-                                     self._sonar_cfg, self._alt_cfg)
+        self._backend = 'python'
+        if use_cpp_backend:
+            try:
+                import occupancy_map_cpp as _cpp
+                cpp_cfg = _cpp.OccupancyMapConfig()
+                for attr, val in vars(omap_cfg).items():
+                    if hasattr(cpp_cfg, attr):
+                        setattr(cpp_cfg, attr, val)
+                self.mapper = _cpp.ObstacleMapper(
+                    cpp_cfg, _cpp.DVLConfig(), _cpp.SonarConfig(), _cpp.AltimeterConfig()
+                )
+                self._Pose                 = _cpp.Pose
+                self._SensorType           = _cpp.SensorType
+                self._DVLMeasurement       = _cpp.DVLMeasurement
+                self._AltimeterMeasurement = _cpp.AltimeterMeasurement
+                self._SonarMeasurement     = _cpp.SonarMeasurement
+                self._backend = 'cpp'
+                print("Using C++ backend")
+            except ImportError:
+                use_cpp_backend = False
+                print("C++ backend unavailable, falling back to Python")
+        # Sonar/altimeter configs kept as Python objects for threshold checks
+        self._sonar_max_range = SonarConfig().max_range
+        self._alt_max_range   = AltimeterConfig().max_range
+
+        if not use_cpp_backend:
+            self.mapper = ObstacleMapper(
+                omap_cfg, self._dvl_cfg, SonarConfig(), AltimeterConfig()
+            )
+            self._Pose                 = Pose
+            self._SensorType           = SensorType
+            self._DVLMeasurement       = DVLMeasurement
+            self._AltimeterMeasurement = AltimeterMeasurement
+            self._SonarMeasurement     = SonarMeasurement
 
         # Tracked vehicle state (updated from ACFR_NAV)
         self._nav_x: float = 0.0
@@ -237,8 +268,10 @@ class PlaybackServer:
         self._btk_t = None
         self._isa_t = None
 
-        # Pre-build terrain map from nav trajectory bounds
-        self._terrain_map_msg = self._build_terrain_map_from_events()
+        # Sparse 3D height map — filled as sensors fire, broadcast periodically
+        self._init_height_map()
+        self._terrain_map_msg: str = self._build_terrain_map_msg()
+        self._hmap_last_sent: float = 0.0
 
     def _load_decoders(self) -> None:
         _ensure_lcm_path(self.lcm_types_path)
@@ -249,21 +282,18 @@ class PlaybackServer:
         self._btk_t = nucleus_bottomtrack_t
         self._isa_t = isa500_t
 
-    def _build_terrain_map_from_events(self) -> str:
-        """Build a flat terrain map sized to cover the vehicle's actual trajectory."""
+    def _init_height_map(self) -> None:
+        """Scan nav events to determine map bounds, then initialise an empty height map."""
         _ensure_lcm_path(self.lcm_types_path)
         from acfrlcm import auv_acfr_nav_t
 
-        xs, ys, depths = [], [], []
+        xs, ys = [], []
         for _utime, suffix, raw in self.events:
             if suffix == 'ACFR_NAV':
                 try:
                     msg = auv_acfr_nav_t.decode(raw)
                     north, east = (msg.y, msg.x) if self.swap_xy else (msg.x, msg.y)
-                    xs.append(north)
-                    ys.append(east)
-                    if msg.depth > 0:
-                        depths.append(msg.depth)
+                    xs.append(north); ys.append(east)
                 except Exception:
                     pass
 
@@ -277,33 +307,67 @@ class PlaybackServer:
         else:
             ox, oy, nx, ny = -120.0, -120.0, 120, 120
 
-        # Estimate operating depth from nav altitude field; fall back to 20m
-        avg_depth = float(np.mean(depths)) if depths else 20.0
-        min_z = max(0.0, avg_depth - 5.0)
-        max_z = avg_depth + 5.0
+        self._hmap_ox: float = ox
+        self._hmap_oy: float = oy
+        self._hmap_nx: int = nx
+        self._hmap_ny: int = ny
+        self._hmap_dx: float = dx
+        self._hmap_dy: float = dy
+        self._height_map: np.ndarray = np.full((ny, nx), np.nan)
+        self._hmap_dirty: bool = False
 
-        data = [avg_depth] * (nx * ny)
+    def _build_terrain_map_msg(self) -> str:
+        """Serialise the current sparse height map for the browser.
+
+        Unexplored cells are encoded as JSON null so the browser can render
+        them in a distinct 'unexplored' colour without affecting the depth
+        colour scale.
+        """
+        hmap = self._height_map
+        valid = hmap[~np.isnan(hmap)]
+        if len(valid) >= 2:
+            min_z = float(np.min(valid))
+            max_z = float(np.max(valid))
+            if max_z - min_z < 1.0:
+                max_z = min_z + 1.0   # prevent degenerate colour range
+        else:
+            min_z, max_z = 5.0, 25.0  # defaults before enough data arrives
+
+        data = [None if np.isnan(v) else float(v) for v in hmap.flatten()]
         return json.dumps({
             'type': 'terrain_map',
-            'nx': nx, 'ny': ny,
-            'dx': dx, 'dy': dy,
-            'ox': ox, 'oy': oy,
+            'nx': self._hmap_nx, 'ny': self._hmap_ny,
+            'dx': float(self._hmap_dx), 'dy': float(self._hmap_dy),
+            'ox': float(self._hmap_ox), 'oy': float(self._hmap_oy),
             'minZ': min_z, 'maxZ': max_z,
             'data': data,
             'mission_path': [],
         })
 
+    def _record_terrain_hit(self, world_x: float, world_y: float,
+                            depth: float) -> None:
+        """Record a terrain height observation; keep the shallowest (surface) depth."""
+        if not np.isfinite(depth) or depth < 0.0:
+            return
+        ix = int(np.floor((world_x - self._hmap_ox) / self._hmap_dx))
+        iy = int(np.floor((world_y - self._hmap_oy) / self._hmap_dy))
+        if 0 <= ix < self._hmap_nx and 0 <= iy < self._hmap_ny:
+            existing = self._height_map[iy, ix]
+            if np.isnan(existing) or depth < existing:
+                self._height_map[iy, ix] = depth
+                self._hmap_dirty = True
+
     # ------------------------------------------------------------------
     # Pose helpers
     # ------------------------------------------------------------------
 
-    def _nav_to_pose(self, msg) -> Pose:
+    def _nav_to_pose(self, msg):
         if self.swap_xy:
             north, east = msg.y, msg.x
         else:
             north, east = msg.x, msg.y
-        return Pose(north=north, east=east,
-                    depth=msg.depth, heading=msg.heading)
+        return self._Pose(north=north, east=east,
+                          depth=msg.depth, heading=msg.heading)
 
     # ------------------------------------------------------------------
     # Event processing
@@ -356,46 +420,74 @@ class PlaybackServer:
             valid = np.array(msg.distance_beam_valid[:n], dtype=bool)
             # Sentinel: distance == 0.0 means invalid even if flag not set
             valid &= ranges > 0.0
-            pose = Pose(north=self._nav_x, east=self._nav_y,
-                        depth=self._nav_depth, heading=self._nav_heading)
+            pose = self._Pose(north=self._nav_x, east=self._nav_y,
+                             depth=self._nav_depth, heading=self._nav_heading)
             self.mapper.update_sensor(
-                SensorType.DVL,
-                DVLMeasurement(ranges=ranges, hit_surface=valid),
+                self._SensorType.DVL,
+                self._DVLMeasurement(ranges=ranges, hit_surface=valid),
                 pose,
             )
             self._dvl_hit_xy = _dvl_hit_xy(
                 self._nav_x, self._nav_y, self._nav_heading,
                 ranges, self._dvl_cfg, valid,
             )
+            # Rasterise 3-D beam hit points into the height map
+            dirs = self._dvl_cfg.beam_directions_3d   # shape (n, 3): fwd, stbd, down
+            cos_h = np.cos(self._nav_heading)
+            sin_h = np.sin(self._nav_heading)
+            for i in range(min(len(ranges), len(dirs))):
+                if not valid[i] or ranges[i] <= 0:
+                    continue
+                r = ranges[i]
+                fwd, stbd, down = dirs[i, 0], dirs[i, 1], dirs[i, 2]
+                self._record_terrain_hit(
+                    self._nav_x + r * fwd * cos_h - r * stbd * sin_h,
+                    self._nav_y + r * fwd * sin_h + r * stbd * cos_h,
+                    self._nav_depth + r * down,
+                )
 
         elif suffix == 'NUCLEUS.ALTIMETER' and self._initialized:
             msg = self._alt_t.decode(raw)
             dist = msg.altimeter_distance
-            hit = dist > 0.0 and dist < self._alt_cfg.max_range - 0.05
-            pose = Pose(north=self._nav_x, east=self._nav_y,
-                        depth=self._nav_depth, heading=self._nav_heading)
+            hit = dist > 0.0 and dist < self._alt_max_range - 0.05
+            pose = self._Pose(north=self._nav_x, east=self._nav_y,
+                             depth=self._nav_depth, heading=self._nav_heading)
             self.mapper.update_sensor(
-                SensorType.ALTIMETER,
-                AltimeterMeasurement(range_m=dist if dist > 0 else 1.0, hit=hit),
+                self._SensorType.ALTIMETER,
+                self._AltimeterMeasurement(range_m=dist if dist > 0 else 1.0, hit=hit),
                 pose,
             )
+            # Rasterise altimeter hit — straight-down return at vehicle position
+            if hit:
+                self._record_terrain_hit(self._nav_x, self._nav_y,
+                                         self._nav_depth + dist)
 
         elif suffix == 'ISA500_FWD' and self._initialized:
             msg = self._isa_t.decode(raw)
             dist = msg.distance
-            max_r = self._sonar_cfg.max_range
+            max_r = self._sonar_max_range
             hit = 0.0 < dist < max_r - 0.1
-            pose = Pose(north=self._nav_x, east=self._nav_y,
-                        depth=self._nav_depth, heading=self._nav_heading)
+            pose = self._Pose(north=self._nav_x, east=self._nav_y,
+                             depth=self._nav_depth, heading=self._nav_heading)
             self.mapper.update_sensor(
-                SensorType.SONAR,
-                SonarMeasurement(range_m=dist if dist > 0 else max_r, hit=hit),
+                self._SensorType.SONAR,
+                self._SonarMeasurement(range_m=dist if dist > 0 else max_r, hit=hit),
                 pose,
             )
             self._sonar_hit_xy = _sonar_hit_xy(
                 self._nav_x, self._nav_y, self._nav_heading,
                 dist, self.mapper.omap.cfg.vehicle_length, hit,
             )
+            # Rasterise sonar hit — skip shallow returns (surface reflections)
+            if hit and self._nav_depth >= self.mapper.omap.cfg.sonar_min_depth_m:
+                vl = self.mapper.omap.cfg.vehicle_length
+                cos_h = np.cos(self._nav_heading)
+                sin_h = np.sin(self._nav_heading)
+                self._record_terrain_hit(
+                    self._nav_x + (vl / 2.0 + dist) * cos_h,
+                    self._nav_y + (vl / 2.0 + dist) * sin_h,
+                    self._nav_depth,
+                )
 
     def _current_log_utime(self) -> int:
         """Return the log-time (μs) we should have processed up to right now."""
@@ -452,7 +544,7 @@ class PlaybackServer:
 
         state = {
             'sim_mode': '3d',
-            'backend': 'python',
+            'backend': self._backend,
             'vehicle_x': float(self._arc_local),
             'vehicle_wx': float(self._nav_x),
             'vehicle_y': float(self._nav_y),
@@ -503,6 +595,20 @@ class PlaybackServer:
                     self.playing = False
                     print("\nEnd of log reached.")
 
+            # Broadcast updated height map every 2 s while data is flowing
+            now = time.monotonic()
+            if self._hmap_dirty and (now - self._hmap_last_sent >= 2.0) and self.clients:
+                self._terrain_map_msg = self._build_terrain_map_msg()
+                self._hmap_dirty = False
+                self._hmap_last_sent = now
+                dead = set()
+                for client in list(self.clients):
+                    try:
+                        await client.send(self._terrain_map_msg)
+                    except websockets.exceptions.ConnectionClosed:
+                        dead.add(client)
+                self.clients -= dead
+
             if self.clients:
                 msg = self._build_state_msg()
                 dead = set()
@@ -550,9 +656,23 @@ class PlaybackServer:
                     self._xy_trail = []
                     self._dvl_hit_xy = []
                     self._sonar_hit_xy = None
+                    self._height_map[:] = np.nan
+                    self._hmap_dirty = False
+                    self._terrain_map_msg = self._build_terrain_map_msg()
                     omap_cfg = OccupancyMapConfig()
-                    self.mapper = ObstacleMapper(omap_cfg, self._dvl_cfg,
-                                                 self._sonar_cfg, self._alt_cfg)
+                    if self._backend == 'cpp':
+                        import occupancy_map_cpp as _cpp
+                        cpp_cfg = _cpp.OccupancyMapConfig()
+                        for attr, val in vars(omap_cfg).items():
+                            if hasattr(cpp_cfg, attr):
+                                setattr(cpp_cfg, attr, val)
+                        self.mapper = _cpp.ObstacleMapper(
+                            cpp_cfg, _cpp.DVLConfig(), _cpp.SonarConfig(), _cpp.AltimeterConfig()
+                        )
+                    else:
+                        self.mapper = ObstacleMapper(
+                            omap_cfg, self._dvl_cfg, SonarConfig(), AltimeterConfig()
+                        )
                     await websocket.send(self._terrain_map_msg)
                 elif cmd == 'param':
                     key = data.get('key')
@@ -651,12 +771,22 @@ class PlaybackServer:
                 "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
                 "  }"
             )
+            # Render unexplored (null) height map cells as dark grey
+            .replace(
+                "      const z = data[ic];\n"
+                "      const [r, g, b] = depthToRgb(z, minZ, maxZ);",
+                "      const z = data[ic];\n"
+                "      let r, g, b;\n"
+                "      if (z == null) { r = g = b = 35; }\n"
+                "      else { [r, g, b] = depthToRgb(z, minZ, maxZ); }"
+            )
         ).encode()
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self_):
                 self_.send_response(200)
                 self_.send_header('Content-Type', 'text/html')
+                self_.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
                 self_.end_headers()
                 self_.wfile.write(client_html)
 
@@ -709,6 +839,8 @@ def main() -> None:
                         help='WebSocket port (default: 8083)')
     parser.add_argument('--swap-xy', action='store_true',
                         help='Swap nav.x/nav.y if vehicle uses east-first convention')
+    parser.add_argument('--cpp', action='store_true', dest='use_cpp',
+                        help='Use the C++ occupancy map backend (falls back to Python if unavailable)')
     parser.add_argument('--lcm-types-path', default=_DEFAULT_LCM_TYPES_PATH,
                         metavar='PATH',
                         help='Path to directory containing perls/lcmtypes package')
@@ -745,6 +877,7 @@ def main() -> None:
         ws_port=args.ws_port,
         initial_speed=args.speed,
         swap_xy=args.swap_xy,
+        use_cpp_backend=args.use_cpp,
         lcm_types_path=args.lcm_types_path,
     )
 

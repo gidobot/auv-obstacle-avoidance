@@ -294,14 +294,23 @@ function sendSensorToggle(key, enabled) {
 const mapW = 420, mapH = 420;
 let terrainImageData = null;
 
-// Depth-to-colour: shallow (low depth) = sandy yellow, deep = dark teal
+// Depth-to-colour: Viridis colormap — shallow = bright yellow, deep = dark purple.
+// Perceptually uniform: equal depth steps produce equal perceived colour steps,
+// making 2–5 m variations clearly visible even in a 20–50 m depth range.
 function depthToRgb(z, minZ, maxZ) {
   const t = Math.max(0, Math.min(1, (z - minZ) / (maxZ - minZ)));
-  // 0=shallow (sandy), 1=deep (dark blue)
-  const r = Math.round(180 - t * 150);
-  const g = Math.round(160 - t * 100);
-  const b = Math.round(80  + t * 120);
-  return [r, g, b];
+  // Viridis LUT (12 stops). Inverted so shallow (t=0) → yellow, deep (t=1) → purple.
+  const s = 1.0 - t;
+  const lut = [
+    [ 68,  1, 84], [ 72, 35,116], [ 64, 67,135], [ 52, 96,141],
+    [ 41,123,142], [ 32,148,140], [ 34,167,133], [ 66,190,113],
+    [121,209, 81], [180,222, 44], [229,228, 25], [253,231, 37],
+  ];
+  const k = s * (lut.length - 1);
+  const i = Math.min(Math.floor(k), lut.length - 2);
+  const f = k - i;
+  const [r0,g0,b0] = lut[i], [r1,g1,b1] = lut[i+1];
+  return [Math.round(r0+f*(r1-r0)), Math.round(g0+f*(g1-g0)), Math.round(b0+f*(b1-b0))];
 }
 
 function renderTerrainMap() {
@@ -461,18 +470,23 @@ function drawTopDown(s) {
   ctx.fillStyle = '#888'; ctx.font = '10px monospace'; ctx.textAlign = 'left';
   ctx.fillText(`X: ${s.vehicle_x.toFixed(0)}m  Y: ${s.vehicle_y.toFixed(0)}m`, 6, mapH - 6);
 
-  // Depth colour scale
+  // Depth colour scale — sample depthToRgb at 11 stops so the full viridis
+  // curve is reproduced (a 2-stop canvas gradient would interpolate in sRGB
+  // and skip the intermediate hues).
   const barX = mapW - 22, barY = 10, barH = 120, barW = 12;
   const grad = ctx.createLinearGradient(0, barY, 0, barY + barH);
-  const [sr, sg, sb] = depthToRgb(terrainMap.minZ, terrainMap.minZ, terrainMap.maxZ);
-  const [dr, dg, db] = depthToRgb(terrainMap.maxZ, terrainMap.minZ, terrainMap.maxZ);
-  grad.addColorStop(0, `rgb(${sr},${sg},${sb})`);
-  grad.addColorStop(1, `rgb(${dr},${dg},${db})`);
+  for (let step = 0; step <= 10; step++) {
+    const t = step / 10;
+    const zVal = terrainMap.minZ + t * (terrainMap.maxZ - terrainMap.minZ);
+    const [cr, cg, cb] = depthToRgb(zVal, terrainMap.minZ, terrainMap.maxZ);
+    grad.addColorStop(t, `rgb(${cr},${cg},${cb})`);
+  }
   ctx.fillStyle = grad; ctx.fillRect(barX, barY, barW, barH);
   ctx.strokeStyle = '#555'; ctx.lineWidth = 0.5; ctx.strokeRect(barX, barY, barW, barH);
-  ctx.fillStyle = '#aaa'; ctx.font = '9px monospace'; ctx.textAlign = 'left';
-  ctx.fillText(terrainMap.minZ.toFixed(0)+'m', barX + barW + 2, barY + 8);
-  ctx.fillText(terrainMap.maxZ.toFixed(0)+'m', barX + barW + 2, barY + barH);
+  // Labels right-aligned to the left of the bar so they stay within the canvas.
+  ctx.fillStyle = '#aaa'; ctx.font = '9px monospace'; ctx.textAlign = 'right';
+  ctx.fillText(terrainMap.minZ.toFixed(0)+'m', barX - 2, barY + 8);
+  ctx.fillText(terrainMap.maxZ.toFixed(0)+'m', barX - 2, barY + barH);
 }
 
 // ---- 2D profile view (same as original, adapted for profile canvas) ----

@@ -767,24 +767,32 @@ def make_terrain_3d_random_reef(
 
     np.clip(Z, min_depth, max_depth, out=Z)
 
-    def terrain(x: float, y: float) -> float:
-        xc = float(np.clip(x, xs[0], xs[-1]))
-        yc = float(np.clip(y, ys[0], ys[-1]))
+    def terrain(x, y):
+        """Bilinear sample of the precomputed reef grid.
+
+        Accepts scalars or NumPy arrays.  Array inputs return an array of the
+        broadcast shape (used for fast bulk terrain export); scalar inputs
+        return a float (the per-point path used by the simulator).
+        """
+        xa = np.asarray(x, dtype=float)
+        ya = np.asarray(y, dtype=float)
+        scalar = (xa.ndim == 0 and ya.ndim == 0)
+
+        xc = np.clip(xa, xs[0], xs[-1])
+        yc = np.clip(ya, ys[0], ys[-1])
         xf = (xc - xs[0]) / xstep
         yf = (yc - ys[0]) / ystep
-        i0 = int(np.floor(xf))
-        j0 = int(np.floor(yf))
-        i0 = min(max(i0, 0), nx - 2)
-        j0 = min(max(j0, 0), ny - 2)
-        tx = min(max(float(xf - i0), 0.0), 1.0)
-        ty = min(max(float(yf - j0), 0.0), 1.0)
+        i0 = np.clip(np.floor(xf).astype(int), 0, nx - 2)
+        j0 = np.clip(np.floor(yf).astype(int), 0, ny - 2)
+        tx = np.clip(xf - i0, 0.0, 1.0)
+        ty = np.clip(yf - j0, 0.0, 1.0)
         z = (
             (1.0 - tx) * (1.0 - ty) * Z[i0, j0]
             + tx * (1.0 - ty) * Z[i0 + 1, j0]
             + (1.0 - tx) * ty * Z[i0, j0 + 1]
             + tx * ty * Z[i0 + 1, j0 + 1]
         )
-        return float(z)
+        return float(z) if scalar else z
 
     terrain.__name__ = "random_reef_3d"
     terrain._reef_grid_shape = (nx, ny)  # debug / tuning

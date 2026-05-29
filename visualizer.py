@@ -201,6 +201,10 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
   <div class="controls">
     <button id="playBtn" onclick="togglePlay()">Play</button>
     <button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>
+    <button onclick="exportTerrain()" title="Export current terrain as OBJ mesh + PNG heightmap for Blender/Gazebo">Export Terrain</button>
+    <label title="Side length of exported terrain (m), centred on origin">Export size
+      <input type="number" id="exportSize" value="500" min="50" max="2000" step="50" style="width:64px">m
+    </label>
     <label>Time accel
       <input type="range" min="1" max="20" value="1" step="1" id="speedSlider"
              oninput="sendParam('time_accel',+this.value);document.getElementById('spdV').textContent=this.value+'x'">
@@ -287,6 +291,25 @@ function sendParam(key, val) {
 }
 function sendSensorToggle(key, enabled) {
   ws.send(JSON.stringify({ cmd: 'param', key, value: !!enabled }));
+}
+
+// ---- Terrain export (OBJ mesh + MTL + PNG heightmap) ----
+function exportTerrain() {
+  const size = +document.getElementById('exportSize').value || 500;
+  const q = `?size=${size}`;
+  // Trigger three sequential downloads via hidden anchors.
+  const files = [
+    'export/terrain.obj' + q,
+    'export/terrain.mtl' + q,
+    'export/terrain_heightmap.png' + q,
+  ];
+  files.forEach((url, i) => setTimeout(() => {
+    const a = document.createElement('a');
+    a.href = url; a.download = '';
+    document.body.appendChild(a); a.click(); a.remove();
+  }, i * 400));   // stagger so the browser does not block multi-download
+  const st = document.getElementById('status');
+  if (st) st.textContent = `Exporting ${size}×${size} m terrain (OBJ + MTL + PNG)…`;
 }
 
 // ---- Top-down terrain map rendering ----
@@ -1101,6 +1124,166 @@ class VisualizerServer3D:
             if key in data and not bool(data[key]):
                 self.sim.clear_sensor_reading(key.replace('enable_', ''))
 
+    # -------------------------------------------------------------------------
+    # Terrain export
+    # -------------------------------------------------------------------------
+
+    def _sample_terrain_grid(self, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+        """Sample the terrain over the grid ``(ys × xs)`` as positive-down depth.
+
+        Returns an array of shape ``(len(ys), len(xs))`` where ``Z[iy, ix]`` is
+        the depth at ``(xs[ix], ys[iy])``.
+
+        Fast path: most terrain functions are NumPy-aware and evaluate the whole
+        meshgrid in one vectorised call.  For any terrain that only handles
+        scalars, falls back to a vectorised per-point wrapper.
+        """
+        X, Y = np.meshgrid(np.asarray(xs, dtype=float),
+                           np.asarray(ys, dtype=float))   # both (ny, nx)
+        fn = self.sim.terrain_fn
+        try:
+            Z = np.asarray(fn(X, Y), dtype=float)
+            if Z.shape != X.shape:
+                raise ValueError("terrain_fn did not return a full grid")
+        except Exception:
+            # Scalar-only terrain — vectorise the safe per-point accessor.
+            Z = np.vectorize(self.sim._terrain_at)(X, Y).astype(float)
+        return Z
+
+    def _export_terrain_obj(
+        self,
+        cx: float = 0.0,
+        cy: float = 0.0,
+        size_m: float = 500.0,
+        dx_m: float = 2.0,
+    ) -> bytes:
+        """Triangulated Wavefront OBJ mesh of the terrain.
+
+        Axes: X = North, Y = East, Z = Up (depth negated, right-hand Z-up).
+        Blender: File → Import → Wavefront (.obj).
+        Gazebo:  reference as a mesh in an SDF model, or use the PNG heightmap.
+        """
+        n    = int(round(size_m / dx_m)) + 1
+        half = size_m / 2.0
+        xs   = cx - half + np.arange(n) * dx_m
+        ys   = cy - half + np.arange(n) * dx_m
+
+        # Sample heights — sim depth is positive-down; export positive-up.
+        zup = -self._sample_terrain_grid(xs, ys)          # (n, n), z[iy, ix]
+
+        # Vertex normals via central differences (np.gradient handles edges with
+        # one-sided differences, matching a manual clamp-and-difference scheme).
+        dzdy, dzdx = np.gradient(zup, dx_m)               # axis0=y, axis1=x
+        nx_ = -dzdx; ny_ = -dzdy; nz_ = np.ones_like(zup)
+        inv_len = 1.0 / np.sqrt(nx_*nx_ + ny_*ny_ + nz_*nz_)
+        nx_ *= inv_len; ny_ *= inv_len; nz_ *= inv_len
+
+        # Flattened vertex coordinates (row-major: iy outer, ix inner).
+        XX, YY = np.meshgrid(xs, ys)                       # (n, n)
+        vx = XX.ravel(); vy = YY.ravel(); vz = zup.ravel()
+        nxf = nx_.ravel(); nyf = ny_.ravel(); nzf = nz_.ravel()
+
+        out = [
+            f'# Terrain: {self.terrain_label}',
+            f'# Grid: {n}×{n} pts  step {dx_m} m  extent {size_m}×{size_m} m',
+            '# Axes: X = North  Y = East  Z = Up  (right-hand Z-up)',
+            'mtllib terrain.mtl',
+            'o terrain',
+            '',
+        ]
+        out.extend([f'v {x:.3f} {y:.3f} {z:.3f}'
+                    for x, y, z in zip(vx, vy, vz)])
+        out.append('')
+        out.extend([f'vn {a:.5f} {b:.5f} {c:.5f}'
+                    for a, b, c in zip(nxf, nyf, nzf)])
+        out.append('')
+        out.append('usemtl terrain')
+
+        # Triangulated faces (v//vn, 1-indexed).  Indices depend only on the grid
+        # topology, so build them with vectorised arithmetic then format.
+        iy, ix = np.meshgrid(np.arange(n - 1), np.arange(n - 1), indexing='ij')
+        a = (iy * n + ix + 1).ravel()
+        b = a + 1
+        c = a + n
+        d = c + 1
+        tri = np.empty((a.size * 2, 3), dtype=np.int64)
+        tri[0::2] = np.column_stack([a, b, c])
+        tri[1::2] = np.column_stack([b, d, c])
+        out.extend([f'f {p}//{p} {q}//{q} {r}//{r}'
+                    for p, q, r in tri])
+
+        return '\n'.join(out).encode()
+
+    @staticmethod
+    def _export_terrain_mtl() -> bytes:
+        return (
+            '# terrain.mtl\n'
+            'newmtl terrain\n'
+            'Ka 0.15 0.15 0.15\n'
+            'Kd 0.50 0.55 0.60\n'
+            'Ks 0.08 0.08 0.08\n'
+            'Ns 10.0\n'
+            'd 1.0\n'
+            'illum 2\n'
+        ).encode()
+
+    def _export_terrain_png(
+        self,
+        cx: float = 0.0,
+        cy: float = 0.0,
+        size_m: float = 500.0,
+        resolution: int = 513,
+    ) -> tuple:
+        """16-bit grayscale PNG heightmap.  White = shallowest, black = deepest.
+
+        Resolution should be 2^n + 1 for Gazebo compatibility (257 / 513 / 1025).
+        Returns (png_bytes, z_min_m, z_max_m).
+        """
+        import struct, zlib
+
+        half = size_m / 2.0
+        xs   = np.linspace(cx - half, cx + half, resolution)
+        ys   = np.linspace(cy - half, cy + half, resolution)
+
+        # Positive-up heights over the grid (vectorised).
+        zz = -self._sample_terrain_grid(xs, ys)
+
+        z_min  = float(zz.min())
+        z_max  = float(zz.max())
+        z_rng  = z_max - z_min if z_max > z_min else 1.0
+
+        # Shallow (high z) → 65535; deep (low z) → 0
+        z16 = ((zz - z_min) / z_rng * 65535.0).clip(0, 65535).astype(np.uint16)
+
+        # Write 16-bit grayscale PNG (no PIL dependency)
+        def chunk(tag: bytes, data: bytes) -> bytes:
+            raw = tag + data
+            return struct.pack('>I', len(data)) + raw + struct.pack('>I', zlib.crc32(raw) & 0xFFFFFFFF)
+
+        ihdr = chunk(b'IHDR', struct.pack('>IIBBBBB', resolution, resolution, 16, 0, 0, 0, 0))
+
+        be = z16.astype('>u2')                       # big-endian uint16
+        row_w = resolution * 2
+        raw = bytearray(resolution * (1 + row_w))
+        for iy in range(resolution):
+            start = iy * (1 + row_w)
+            raw[start] = 0                            # filter byte = None
+            raw[start + 1: start + 1 + row_w] = be[iy].tobytes()
+
+        png = (b'\x89PNG\r\n\x1a\n'
+               + ihdr
+               + chunk(b'IDAT', zlib.compress(bytes(raw), 6))
+               + chunk(b'IEND', b''))
+
+        print(f'\nGazebo SDF heightmap snippet (paste into your model.sdf):')
+        print(f'  <heightmap>')
+        print(f'    <uri>file://terrain_heightmap.png</uri>')
+        print(f'    <size>{size_m:.0f} {size_m:.0f} {z_rng:.2f}</size>')
+        print(f'    <pos>0 0 {z_max:.3f}</pos>')
+        print(f'  </heightmap>\n')
+
+        return png, z_min, z_max
+
     async def sim_loop(self):
         """Main simulation loop — steps sim and broadcasts state."""
         while True:
@@ -1164,12 +1347,60 @@ class VisualizerServer3D:
 
     async def start(self):
         """Start HTTP (serving 3D HTML) and WebSocket servers."""
+        server = self  # captured for export routes
+
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self_):
+            def _send(self_, body: bytes, content_type: str,
+                      filename: str | None = None):
                 self_.send_response(200)
-                self_.send_header('Content-Type', 'text/html')
+                self_.send_header('Content-Type', content_type)
+                if filename:
+                    self_.send_header('Content-Disposition',
+                                      f'attachment; filename="{filename}"')
+                self_.send_header('Content-Length', str(len(body)))
                 self_.end_headers()
-                self_.wfile.write(HTML_CLIENT_3D.encode())
+                self_.wfile.write(body)
+
+            def do_GET(self_):
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(self_.path)
+                path   = parsed.path
+                qs     = parse_qs(parsed.query)
+
+                def fnum(key, default):
+                    try:    return float(qs.get(key, [default])[0])
+                    except (TypeError, ValueError): return default
+
+                cx     = fnum('cx', 0.0)
+                cy     = fnum('cy', 0.0)
+                size_m = fnum('size', 500.0)
+
+                try:
+                    if path == '/export/terrain.obj':
+                        body = server._export_terrain_obj(
+                            cx, cy, size_m, dx_m=fnum('step', 2.0))
+                        self_._send(body, 'model/obj', 'terrain.obj')
+                        return
+                    if path == '/export/terrain.mtl':
+                        self_._send(server._export_terrain_mtl(),
+                                    'model/mtl', 'terrain.mtl')
+                        return
+                    if path == '/export/terrain_heightmap.png':
+                        res = int(fnum('res', 513))
+                        png, _zmin, _zmax = server._export_terrain_png(
+                            cx, cy, size_m, resolution=res)
+                        self_._send(png, 'image/png', 'terrain_heightmap.png')
+                        return
+                except Exception as exc:  # noqa: BLE001
+                    msg = f'Export failed: {exc}'.encode()
+                    self_.send_response(500)
+                    self_.send_header('Content-Type', 'text/plain')
+                    self_.send_header('Content-Length', str(len(msg)))
+                    self_.end_headers()
+                    self_.wfile.write(msg)
+                    return
+
+                self_._send(HTML_CLIENT_3D.encode(), 'text/html')
 
             def log_message(self_, format, *args):
                 pass

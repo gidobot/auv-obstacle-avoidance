@@ -390,6 +390,113 @@ def _sonar_hit_xy(nav_x: float, nav_y: float, heading_rad: float,
 
 
 # ---------------------------------------------------------------------------
+# Shared browser-client HTML (patched for this tool's WS port + viewport)
+# ---------------------------------------------------------------------------
+
+def _build_client_html(ws_port: int) -> str:
+    """Return the 2D/3D browser client HTML, patched for the given WS port.
+
+    Shared by the log-playback server and the live LCM-subscribe server so the
+    rendering is identical in both modes.
+    """
+    return (
+        HTML_CLIENT_3D
+        # Fix hardcoded WS port
+        .replace("ws://localhost:8081",
+                 f"ws://localhost:{ws_port}")
+        # Null-safe altitude / cmd_depth stats
+        .replace("'Alt: ' + s.altitude.toFixed(2) + 'm'",
+                 "(s.altitude != null ? 'Alt: ' + s.altitude.toFixed(2) + 'm' : 'Alt: --')")
+        .replace("'Cmd: ' + s.cmd_depth.toFixed(2) + 'm'",
+                 "(s.cmd_depth != null ? 'Cmd: ' + s.cmd_depth.toFixed(2) + 'm' : 'Cmd: --')")
+        # Top-down view: keep vehicle centered (replace fixed terrain-origin
+        # coordinate system with a vehicle-centred ±60 m window)
+        .replace(
+            "  // Draw terrain background\n"
+            "  if (terrainImageData) ctx.drawImage(terrainImageData, 0, 0);\n"
+            "\n"
+            "  const { nx, ny, ox, oy, dx, dy } = terrainMap;\n"
+            "  const worldW = nx * dx, worldH = ny * dy;\n"
+            "\n"
+            "  // World → pixel\n"
+            "  function toPixel(wx, wy) {\n"
+            "    return [\n"
+            "      (wx - ox) / worldW * mapW,\n"
+            "      (1 - (wy - oy) / worldH) * mapH,   // north up\n"
+            "    ];\n"
+            "  }",
+            "  const { nx, ny, ox, oy, dx, dy } = terrainMap;\n"
+            "  const worldW = nx * dx, worldH = ny * dy;\n"
+            "\n"
+            "  // Vehicle-centred view: show ±viewHalf metres around the vehicle\n"
+            "  const viewHalf = 60;\n"
+            "  const vwxC = (s.vehicle_wx !== undefined) ? s.vehicle_wx : s.vehicle_x;\n"
+            "  const vyC  = s.vehicle_y || 0;\n"
+            "  const viewOx = vwxC - viewHalf, viewOy = vyC - viewHalf;\n"
+            "  const viewSize = viewHalf * 2;\n"
+            "\n"
+            "  // Draw terrain background sliced to the centred window\n"
+            "  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, mapW, mapH);\n"
+            "  if (terrainImageData) {\n"
+            "    const srcX = (viewOx - ox) / worldW * mapW;\n"
+            "    const srcY = (1 - (viewOy + viewSize - oy) / worldH) * mapH;\n"
+            "    const srcW = viewSize / worldW * mapW;\n"
+            "    const srcH = viewSize / worldH * mapH;\n"
+            "    ctx.drawImage(terrainImageData, srcX, srcY, srcW, srcH, 0, 0, mapW, mapH);\n"
+            "  }\n"
+            "\n"
+            "  // World → pixel (vehicle-centred)\n"
+            "  function toPixel(wx, wy) {\n"
+            "    return [\n"
+            "      (wx - viewOx) / viewSize * mapW,\n"
+            "      (1 - (wy - viewOy) / viewSize) * mapH,  // north up\n"
+            "    ];\n"
+            "  }"
+        )
+        # Update grid-line loop bounds to use the centred view window
+        .replace(
+            "  const gx0 = Math.ceil(ox / 20) * 20;\n"
+            "  for (let gx = gx0; gx <= ox + worldW; gx += 20) {\n"
+            "    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
+            "  }\n"
+            "  const gy0 = Math.ceil(oy / 20) * 20;\n"
+            "  for (let gy = gy0; gy <= oy + worldH; gy += 20) {\n"
+            "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
+            "  }",
+            "  const gx0 = Math.ceil(viewOx / 20) * 20;\n"
+            "  for (let gx = gx0; gx <= viewOx + viewSize; gx += 20) {\n"
+            "    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
+            "  }\n"
+            "  const gy0 = Math.ceil(viewOy / 20) * 20;\n"
+            "  for (let gy = gy0; gy <= viewOy + viewSize; gy += 20) {\n"
+            "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
+            "  }"
+        )
+        # Render unexplored (null) height map cells as dark grey
+        .replace(
+            "      const z = data[ic];\n"
+            "      const [r, g, b] = depthToRgb(z, minZ, maxZ);",
+            "      const z = data[ic];\n"
+            "      let r, g, b;\n"
+            "      if (z == null) { r = g = b = 35; }\n"
+            "      else { [r, g, b] = depthToRgb(z, minZ, maxZ); }"
+        )
+        # Add 3D map button after Reset
+        .replace(
+            r"""<button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>""",
+            r"""<button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>"""
+            "\n    "
+            r"""<button onclick="window.open('/3d','_blank')" title="Open interactive 3D terrain map">3D Map ↗</button>"""
+        )
+    )
+
+
+def _build_3d_html(ws_port: int) -> str:
+    """Return the interactive 3D terrain page, patched for the given WS port."""
+    return _HTML_3D.replace('%%WS_PORT%%', str(ws_port))
+
+
+# ---------------------------------------------------------------------------
 # PlaybackServer
 # ---------------------------------------------------------------------------
 
@@ -918,99 +1025,9 @@ class PlaybackServer:
         """Start HTTP and WebSocket servers, then run the playback loop."""
         self._load_decoders()
 
-        # Patch the HTML client for LCM playback mode.
-        client_html = (
-            HTML_CLIENT_3D
-            # Fix hardcoded WS port
-            .replace("ws://localhost:8081",
-                     f"ws://localhost:{self.ws_port}")
-            # Null-safe altitude / cmd_depth stats
-            .replace("'Alt: ' + s.altitude.toFixed(2) + 'm'",
-                     "(s.altitude != null ? 'Alt: ' + s.altitude.toFixed(2) + 'm' : 'Alt: --')")
-            .replace("'Cmd: ' + s.cmd_depth.toFixed(2) + 'm'",
-                     "(s.cmd_depth != null ? 'Cmd: ' + s.cmd_depth.toFixed(2) + 'm' : 'Cmd: --')")
-            # Top-down view: keep vehicle centered (replace fixed terrain-origin
-            # coordinate system with a vehicle-centred ±60 m window)
-            .replace(
-                "  // Draw terrain background\n"
-                "  if (terrainImageData) ctx.drawImage(terrainImageData, 0, 0);\n"
-                "\n"
-                "  const { nx, ny, ox, oy, dx, dy } = terrainMap;\n"
-                "  const worldW = nx * dx, worldH = ny * dy;\n"
-                "\n"
-                "  // World → pixel\n"
-                "  function toPixel(wx, wy) {\n"
-                "    return [\n"
-                "      (wx - ox) / worldW * mapW,\n"
-                "      (1 - (wy - oy) / worldH) * mapH,   // north up\n"
-                "    ];\n"
-                "  }",
-                "  const { nx, ny, ox, oy, dx, dy } = terrainMap;\n"
-                "  const worldW = nx * dx, worldH = ny * dy;\n"
-                "\n"
-                "  // Vehicle-centred view: show ±viewHalf metres around the vehicle\n"
-                "  const viewHalf = 60;\n"
-                "  const vwxC = (s.vehicle_wx !== undefined) ? s.vehicle_wx : s.vehicle_x;\n"
-                "  const vyC  = s.vehicle_y || 0;\n"
-                "  const viewOx = vwxC - viewHalf, viewOy = vyC - viewHalf;\n"
-                "  const viewSize = viewHalf * 2;\n"
-                "\n"
-                "  // Draw terrain background sliced to the centred window\n"
-                "  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, mapW, mapH);\n"
-                "  if (terrainImageData) {\n"
-                "    const srcX = (viewOx - ox) / worldW * mapW;\n"
-                "    const srcY = (1 - (viewOy + viewSize - oy) / worldH) * mapH;\n"
-                "    const srcW = viewSize / worldW * mapW;\n"
-                "    const srcH = viewSize / worldH * mapH;\n"
-                "    ctx.drawImage(terrainImageData, srcX, srcY, srcW, srcH, 0, 0, mapW, mapH);\n"
-                "  }\n"
-                "\n"
-                "  // World → pixel (vehicle-centred)\n"
-                "  function toPixel(wx, wy) {\n"
-                "    return [\n"
-                "      (wx - viewOx) / viewSize * mapW,\n"
-                "      (1 - (wy - viewOy) / viewSize) * mapH,  // north up\n"
-                "    ];\n"
-                "  }"
-            )
-            # Update grid-line loop bounds to use the centred view window
-            .replace(
-                "  const gx0 = Math.ceil(ox / 20) * 20;\n"
-                "  for (let gx = gx0; gx <= ox + worldW; gx += 20) {\n"
-                "    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
-                "  }\n"
-                "  const gy0 = Math.ceil(oy / 20) * 20;\n"
-                "  for (let gy = gy0; gy <= oy + worldH; gy += 20) {\n"
-                "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
-                "  }",
-                "  const gx0 = Math.ceil(viewOx / 20) * 20;\n"
-                "  for (let gx = gx0; gx <= viewOx + viewSize; gx += 20) {\n"
-                "    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
-                "  }\n"
-                "  const gy0 = Math.ceil(viewOy / 20) * 20;\n"
-                "  for (let gy = gy0; gy <= viewOy + viewSize; gy += 20) {\n"
-                "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
-                "  }"
-            )
-            # Render unexplored (null) height map cells as dark grey
-            .replace(
-                "      const z = data[ic];\n"
-                "      const [r, g, b] = depthToRgb(z, minZ, maxZ);",
-                "      const z = data[ic];\n"
-                "      let r, g, b;\n"
-                "      if (z == null) { r = g = b = 35; }\n"
-                "      else { [r, g, b] = depthToRgb(z, minZ, maxZ); }"
-            )
-            # Add 3D map button after Reset
-            .replace(
-                r"""<button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>""",
-                r"""<button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>"""
-                "\n    "
-                r"""<button onclick="window.open('/3d','_blank')" title="Open interactive 3D terrain map">3D Map ↗</button>"""
-            )
-        ).encode()
-
-        html_3d = _HTML_3D.replace('%%WS_PORT%%', str(self.ws_port)).encode()
+        # Patched browser client (shared with the live LCM server).
+        client_html = _build_client_html(self.ws_port).encode()
+        html_3d = _build_3d_html(self.ws_port).encode()
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self_):
@@ -1049,6 +1066,178 @@ class PlaybackServer:
 
 
 # ---------------------------------------------------------------------------
+# LiveServer — subscribe to the deployed oa-mapper grid snapshot over LCM
+# ---------------------------------------------------------------------------
+
+class LiveServer:
+    """Render the live ``<VEHICLE>.OA_GRIDMAP`` channel in the browser client.
+
+    Subscribes to the occupancy-grid snapshot (and OA command) published by the
+    deployed ``oa-mapper`` process and serves the same browser visualizer used
+    for log playback.  Works identically against a live vehicle, a live
+    simulator, or an ``lcm-logplayer`` replay — it is all just LCM.
+    """
+
+    def __init__(
+        self,
+        vehicle_name: str,
+        http_port: int = 8082,
+        ws_port: int = 8083,
+        lcm_types_path: str = _DEFAULT_LCM_TYPES_PATH,
+    ):
+        self.vehicle_name = vehicle_name
+        self.http_port = http_port
+        self.ws_port = ws_port
+        self.lcm_types_path = lcm_types_path
+        self.clients: set = set()
+
+        self._latest_state: Optional[str] = None
+        self._xy_trail: list = []
+        self._last_cmd = None          # most recent auv_oa_command_t
+        self._lc = None                # lcm.LCM handle
+
+        # Flat top-down backdrop so the map view shows the vehicle + trail.
+        # (The occupancy grid itself renders in the profile view from state.)
+        self._terrain_map_msg = json.dumps({
+            'type': 'terrain_map', 'nx': 2, 'ny': 2, 'dx': 1000.0, 'dy': 1000.0,
+            'ox': -500.0, 'oy': -500.0, 'minZ': 0.0, 'maxZ': 1.0,
+            'data': [0.5, 0.5, 0.5, 0.5], 'mission_path': [],
+        })
+
+    # ------------------------------------------------------------------
+    # LCM decode → browser state
+    # ------------------------------------------------------------------
+
+    def _on_gridmap(self, channel, data):
+        g = self._gridmap_t.decode(data)
+        nx, nz, cx = g.nx, g.nz, g.cx
+        manifold_z = [None if (z != z) else float(z) for z in g.manifold_z]
+        cmd_depth_profile = [None if (d != d) else float(d) for d in g.cmd_depth]
+
+        vehicle_x = g.grid_origin_x + cx * g.dx       # along-track coord (profile)
+        seafloor_z = float(g.manifold_z[cx]) if 0 <= cx < nx else g.vehicle_z
+        cmd_at_vehicle = cmd_depth_profile[cx] if 0 <= cx < nx else None
+        altitude = (self._last_cmd.altitude
+                    if (self._last_cmd is not None and self._last_cmd.altitude >= 0)
+                    else (None if g.dvl_altitude < 0 else float(g.dvl_altitude)))
+
+        self._xy_trail.append([float(g.vehicle_x), float(g.vehicle_y)])
+        if len(self._xy_trail) > 500:
+            self._xy_trail = self._xy_trail[-500:]
+
+        horizon_back = cx * g.dx
+        horizon_fwd = (nx - 1 - cx) * g.dx
+        state = {
+            'sim_mode': '3d', 'backend': 'oa-mapper',
+            'vehicle_x': float(vehicle_x),
+            'vehicle_wx': float(g.vehicle_x), 'vehicle_y': float(g.vehicle_y),
+            'vehicle_z': float(g.vehicle_z), 'vehicle_heading': float(g.vehicle_heading),
+            'terrain_z': seafloor_z,
+            'altitude': altitude,
+            'time': float(g.utime) / 1e6,
+            'cmd_depth': cmd_at_vehicle,
+            'dvl_altitude': None if g.dvl_altitude < 0 else float(g.dvl_altitude),
+            'control_mode': g.control_mode,
+            'terrain_label': f'LIVE: {self.vehicle_name}',
+            'grid': list(g.grid),
+            'nx': nx, 'nz': nz, 'dx': g.dx, 'dz': g.dz, 'cx': cx,
+            'grid_origin_x': float(g.grid_origin_x),
+            'manifold_grid_origin_x': float(g.manifold_grid_origin_x),
+            'z_min': float(g.grid_origin_z),
+            'z_max': float(g.grid_origin_z + nz * g.dz),
+            'horizon_fwd': float(horizon_fwd), 'horizon_back': float(horizon_back),
+            'vehicle_length': 2.0,
+            'manifold_z': manifold_z,
+            'cmd_depth_profile': cmd_depth_profile,
+            'path_waypoints': [],
+            'terrain_profile': [
+                [float(vehicle_x - horizon_back), seafloor_z],
+                [float(vehicle_x + horizon_fwd), seafloor_z],
+            ],
+            'xy_trail': self._xy_trail[-500:],
+            'dvl_hit_xy': None, 'sonar_hit_xy': None,
+            'enable_dvl': True, 'enable_altimeter': True, 'enable_sonar': True,
+        }
+        self._latest_state = json.dumps(state)
+
+    def _on_command(self, channel, data):
+        self._last_cmd = self._command_t.decode(data)
+
+    # ------------------------------------------------------------------
+    # Servers
+    # ------------------------------------------------------------------
+
+    async def _broadcast_loop(self):
+        while True:
+            if self.clients and self._latest_state is not None:
+                dead = set()
+                for client in list(self.clients):
+                    try:
+                        await client.send(self._latest_state)
+                    except websockets.exceptions.ConnectionClosed:
+                        dead.add(client)
+                self.clients -= dead
+            await asyncio.sleep(0.1)
+
+    async def _ws_handler(self, websocket):
+        self.clients.add(websocket)
+        try:
+            await websocket.send(self._terrain_map_msg)
+            if self._latest_state is not None:
+                await websocket.send(self._latest_state)
+            async for _message in websocket:
+                pass   # live mode has no playback controls; ignore client cmds
+        finally:
+            self.clients.discard(websocket)
+
+    def _lcm_thread(self):
+        while True:
+            self._lc.handle_timeout(200)
+
+    async def start(self):
+        import lcm
+        _ensure_lcm_path(self.lcm_types_path)
+        from acfrlcm import auv_oa_gridmap_t, auv_oa_command_t
+        self._gridmap_t = auv_oa_gridmap_t
+        self._command_t = auv_oa_command_t
+
+        self._lc = lcm.LCM()
+        self._lc.subscribe(f"{self.vehicle_name}.OA_GRIDMAP", self._on_gridmap)
+        self._lc.subscribe(f"{self.vehicle_name}.OA_COMMAND", self._on_command)
+        threading.Thread(target=self._lcm_thread, daemon=True).start()
+
+        client_html = _build_client_html(self.ws_port).encode()
+        html_3d = _build_3d_html(self.ws_port).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self_):
+                content = html_3d if self_.path.startswith('/3d') else client_html
+                self_.send_response(200)
+                self_.send_header('Content-Type', 'text/html')
+                self_.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                self_.end_headers()
+                self_.wfile.write(content)
+
+            def log_message(self_, fmt, *args):
+                pass
+
+        threading.Thread(
+            target=lambda: http.server.HTTPServer(
+                ('0.0.0.0', self.http_port), Handler).serve_forever(),
+            daemon=True,
+        ).start()
+
+        print(f"Live oa-mapper viewer for vehicle {self.vehicle_name}")
+        print(f"  subscribing: {self.vehicle_name}.OA_GRIDMAP / .OA_COMMAND")
+        print(f"  HTTP:       http://localhost:{self.http_port}")
+        print(f"  WebSocket:  ws://localhost:{self.ws_port}")
+        print("Open the URL above; the occupancy grid renders in the profile view.")
+
+        async with websockets.serve(self._ws_handler, '0.0.0.0', self.ws_port):
+            await self._broadcast_loop()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1058,10 +1247,15 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument('log', metavar='LOG_FILE',
-                        help='Path to the LCM log file')
+    parser.add_argument('log', metavar='LOG_FILE', nargs='?',
+                        help='Path to the LCM log file (omit when using --live)')
+    parser.add_argument('--live', action='store_true',
+                        help='Subscribe to the deployed oa-mapper OA_GRIDMAP channel '
+                             'instead of replaying a log (requires --vehicle). Works '
+                             'against a live vehicle, a live simulator, or lcm-logplayer.')
     parser.add_argument('--vehicle', metavar='NAME',
-                        help='Vehicle name (e.g. DURHAM); auto-detected if omitted')
+                        help='Vehicle name (e.g. DURHAM); auto-detected from log if omitted, '
+                             'required with --live')
     parser.add_argument('--speed', type=float, default=1.0, metavar='X',
                         help='Initial playback speed multiplier (default: 1.0)')
     parser.add_argument('--http-port', type=int, default=8082, metavar='PORT',
@@ -1077,15 +1271,31 @@ def main() -> None:
                         help='Path to directory containing perls/lcmtypes package')
     args = parser.parse_args()
 
-    if not os.path.isfile(args.log):
-        parser.error(f"Log file not found: {args.log}")
-
     _ensure_lcm_path(args.lcm_types_path)
 
     try:
         import lcm  # noqa: F401
     except ImportError:
         raise SystemExit("lcm package not found — install the LCM Python bindings")
+
+    # --- Live mode: subscribe to the deployed oa-mapper grid snapshot ---
+    if args.live:
+        if not args.vehicle:
+            parser.error("--live requires --vehicle NAME")
+        live = LiveServer(
+            vehicle_name=args.vehicle,
+            http_port=args.http_port,
+            ws_port=args.ws_port,
+            lcm_types_path=args.lcm_types_path,
+        )
+        asyncio.run(live.start())
+        return
+
+    # --- Log-playback mode ---
+    if not args.log:
+        parser.error("a LOG_FILE is required unless --live is given")
+    if not os.path.isfile(args.log):
+        parser.error(f"Log file not found: {args.log}")
 
     vehicle = args.vehicle
     if vehicle is None:

@@ -34,6 +34,72 @@ from simulator import (
 )
 
 
+# Viridis colormap (12 stops, dark purple → bright yellow).  Mirrors the LUT
+# used by the 3D/top-down view's depthToRgb() so exported terrain is coloured
+# identically: shallow (high z) → yellow, deep (low z) → purple.
+_VIRIDIS_LUT = np.array([
+    [ 68,   1,  84], [ 72,  35, 116], [ 64,  67, 135], [ 52,  96, 141],
+    [ 41, 123, 142], [ 32, 148, 140], [ 34, 167, 133], [ 66, 190, 113],
+    [121, 209,  81], [180, 222,  44], [229, 228,  25], [253, 231,  37],
+], dtype=float)
+
+
+def _viridis_rgb(t: np.ndarray) -> np.ndarray:
+    """Map normalised values ``t`` in [0, 1] to Viridis RGB (float, 0–255).
+
+    ``t = 0`` → purple, ``t = 1`` → yellow.  Linear interpolation between the
+    12 LUT stops, matching the JS ``depthToRgb`` used by the live views.
+    Accepts any-shape array; returns ``t.shape + (3,)``.
+    """
+    t = np.clip(t, 0.0, 1.0)
+    k = t * (_VIRIDIS_LUT.shape[0] - 1)
+    i = np.minimum(np.floor(k).astype(int), _VIRIDIS_LUT.shape[0] - 2)
+    f = (k - i)[..., None]
+    return _VIRIDIS_LUT[i] * (1.0 - f) + _VIRIDIS_LUT[i + 1] * f
+
+
+def _sanitize_export_name(name: str | None) -> str:
+    """Reduce a user-supplied export name to a safe filename stem.
+
+    Strips any directory components and a trailing model/image extension, then
+    keeps only ``[A-Za-z0-9._-]`` (other characters become ``_``).  Falls back
+    to ``'terrain'`` when the result is empty.  The returned stem is shared by
+    the OBJ, MTL and PNG outputs and embedded in their cross-references.
+    """
+    import re
+    stem = os.path.basename((name or '').strip())
+    stem = re.sub(r'\.(obj|mtl|png)$', '', stem, flags=re.IGNORECASE)
+    stem = re.sub(r'[^A-Za-z0-9._-]', '_', stem).strip('.')
+    return stem or 'terrain'
+
+
+def _fractal_noise(shape: tuple, octaves: int, seed: int) -> np.ndarray:
+    """Smooth fractal value-noise in [0, 1] over ``shape`` (NumPy-only).
+
+    Sums ``octaves`` of bilinearly-upsampled random grids at doubling
+    frequencies, each at half the amplitude of the last.  Used to mottle the
+    terrain diffuse texture so it does not read as a flat colour gradient.
+    """
+    rng  = np.random.default_rng(seed)
+    h, w = shape
+    out  = np.zeros(shape, dtype=float)
+    amp  = 1.0
+    total = 0.0
+    for o in range(octaves):
+        cells = 2 ** (o + 2)                       # grid frequency this octave
+        grid  = rng.random((cells + 1, cells + 1))
+        ys = np.linspace(0.0, cells, h)
+        xs = np.linspace(0.0, cells, w)
+        y0 = np.floor(ys).astype(int); x0 = np.floor(xs).astype(int)
+        y1 = np.minimum(y0 + 1, cells); x1 = np.minimum(x0 + 1, cells)
+        fy = (ys - y0)[:, None]; fx = (xs - x0)[None, :]
+        top = grid[y0][:, x0] * (1 - fx) + grid[y0][:, x1] * fx
+        bot = grid[y1][:, x0] * (1 - fx) + grid[y1][:, x1] * fx
+        out   += amp * (top * (1 - fy) + bot * fy)
+        total += amp
+        amp   *= 0.5
+    return out / total
+
 
 # ---------------------------------------------------------------------------
 # 3D HTML client
@@ -201,7 +267,7 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
   <div class="controls">
     <button id="playBtn" onclick="togglePlay()">Play</button>
     <button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>
-    <button onclick="exportTerrain()" title="Export current terrain as OBJ mesh + PNG heightmap for Blender/Gazebo">Export Terrain</button>
+    <button onclick="exportTerrain()" title="Export current terrain as OBJ mesh + height-coloured textured material + PNG heightmap for Blender/Gazebo">Export Terrain</button>
     <label title="Side length of exported terrain (m), centred on origin">Export size
       <input type="number" id="exportSize" value="500" min="50" max="2000" step="50" style="width:64px">m
     </label>
@@ -293,14 +359,19 @@ function sendSensorToggle(key, enabled) {
   ws.send(JSON.stringify({ cmd: 'param', key, value: !!enabled }));
 }
 
-// ---- Terrain export (OBJ mesh + MTL + PNG heightmap) ----
+// ---- Terrain export (OBJ mesh + MTL + height-coloured diffuse + heightmap) ----
 function exportTerrain() {
   const size = +document.getElementById('exportSize').value || 500;
-  const q = `?size=${size}`;
-  // Trigger three sequential downloads via hidden anchors.
+  // Ask for the export name; all files share this stem (server sanitizes it).
+  const raw = prompt('Terrain file name (used for .obj / .mtl / .png):', 'terrain');
+  if (raw === null) return;                      // cancelled
+  const name = raw.trim() || 'terrain';
+  const q = `?size=${size}&name=${encodeURIComponent(name)}`;
+  // Trigger sequential downloads via hidden anchors.
   const files = [
     'export/terrain.obj' + q,
     'export/terrain.mtl' + q,
+    'export/terrain_diffuse.png' + q,
     'export/terrain_heightmap.png' + q,
   ];
   files.forEach((url, i) => setTimeout(() => {
@@ -309,7 +380,7 @@ function exportTerrain() {
     document.body.appendChild(a); a.click(); a.remove();
   }, i * 400));   // stagger so the browser does not block multi-download
   const st = document.getElementById('status');
-  if (st) st.textContent = `Exporting ${size}×${size} m terrain (OBJ + MTL + PNG)…`;
+  if (st) st.textContent = `Exporting “${name}” (${size}×${size} m: OBJ + MTL + diffuse + heightmap)…`;
 }
 
 // ---- Top-down terrain map rendering ----
@@ -1156,10 +1227,13 @@ class VisualizerServer3D:
         cy: float = 0.0,
         size_m: float = 500.0,
         dx_m: float = 2.0,
+        name: str = 'terrain',
     ) -> bytes:
         """Triangulated Wavefront OBJ mesh of the terrain.
 
         Axes: X = North, Y = East, Z = Up (depth negated, right-hand Z-up).
+        ``name`` is the shared export stem; the mesh references ``<name>.mtl``
+        and uses ``<name>`` as its material name so the bundle stays consistent.
         Blender: File → Import → Wavefront (.obj).
         Gazebo:  reference as a mesh in an SDF model, or use the PNG heightmap.
         """
@@ -1183,21 +1257,32 @@ class VisualizerServer3D:
         vx = XX.ravel(); vy = YY.ravel(); vz = zup.ravel()
         nxf = nx_.ravel(); nyf = ny_.ravel(); nzf = nz_.ravel()
 
+        # Texture coordinates: u along +x, v along +y, both 0..1 across the
+        # extent.  The diffuse texture (_export_terrain_diffuse_png) is written
+        # north-up so that, under the standard bottom-left UV origin, vertex
+        # (iy, ix) samples the colour computed at its own world height.
+        UU, VV = np.meshgrid(np.arange(n) / (n - 1),
+                             np.arange(n) / (n - 1))       # (n, n)
+        uf = UU.ravel(); vf = VV.ravel()
+
         out = [
             f'# Terrain: {self.terrain_label}',
             f'# Grid: {n}×{n} pts  step {dx_m} m  extent {size_m}×{size_m} m',
             '# Axes: X = North  Y = East  Z = Up  (right-hand Z-up)',
-            'mtllib terrain.mtl',
-            'o terrain',
+            f'mtllib {name}.mtl',
+            f'o {name}',
             '',
         ]
         out.extend([f'v {x:.3f} {y:.3f} {z:.3f}'
                     for x, y, z in zip(vx, vy, vz)])
         out.append('')
+        out.extend([f'vt {u:.5f} {v:.5f}'
+                    for u, v in zip(uf, vf)])
+        out.append('')
         out.extend([f'vn {a:.5f} {b:.5f} {c:.5f}'
                     for a, b, c in zip(nxf, nyf, nzf)])
         out.append('')
-        out.append('usemtl terrain')
+        out.append(f'usemtl {name}')
 
         # Triangulated faces (v//vn, 1-indexed).  Indices depend only on the grid
         # topology, so build them with vectorised arithmetic then format.
@@ -1209,22 +1294,27 @@ class VisualizerServer3D:
         tri = np.empty((a.size * 2, 3), dtype=np.int64)
         tri[0::2] = np.column_stack([a, b, c])
         tri[1::2] = np.column_stack([b, d, c])
-        out.extend([f'f {p}//{p} {q}//{q} {r}//{r}'
+        # v/vt/vn share the same index — one attribute per grid vertex.
+        out.extend([f'f {p}/{p}/{p} {q}/{q}/{q} {r}/{r}/{r}'
                     for p, q, r in tri])
 
         return '\n'.join(out).encode()
 
     @staticmethod
-    def _export_terrain_mtl() -> bytes:
+    def _export_terrain_mtl(name: str = 'terrain') -> bytes:
+        # Kd is left white so the height-coloured diffuse texture shows through
+        # unmodulated; the colour/texture lives in <name>_diffuse.png.  The
+        # material name matches the OBJ's usemtl/newmtl reference.
         return (
-            '# terrain.mtl\n'
-            'newmtl terrain\n'
-            'Ka 0.15 0.15 0.15\n'
-            'Kd 0.50 0.55 0.60\n'
-            'Ks 0.08 0.08 0.08\n'
-            'Ns 10.0\n'
+            f'# {name}.mtl\n'
+            f'newmtl {name}\n'
+            'Ka 0.20 0.20 0.20\n'
+            'Kd 1.00 1.00 1.00\n'
+            'Ks 0.06 0.06 0.06\n'
+            'Ns 12.0\n'
             'd 1.0\n'
             'illum 2\n'
+            f'map_Kd {name}_diffuse.png\n'
         ).encode()
 
     def _export_terrain_png(
@@ -1233,6 +1323,7 @@ class VisualizerServer3D:
         cy: float = 0.0,
         size_m: float = 500.0,
         resolution: int = 513,
+        name: str = 'terrain',
     ) -> tuple:
         """16-bit grayscale PNG heightmap.  White = shallowest, black = deepest.
 
@@ -1277,12 +1368,77 @@ class VisualizerServer3D:
 
         print(f'\nGazebo SDF heightmap snippet (paste into your model.sdf):')
         print(f'  <heightmap>')
-        print(f'    <uri>file://terrain_heightmap.png</uri>')
+        print(f'    <uri>file://{name}_heightmap.png</uri>')
         print(f'    <size>{size_m:.0f} {size_m:.0f} {z_rng:.2f}</size>')
         print(f'    <pos>0 0 {z_max:.3f}</pos>')
         print(f'  </heightmap>\n')
 
         return png, z_min, z_max
+
+    def _export_terrain_diffuse_png(
+        self,
+        cx: float = 0.0,
+        cy: float = 0.0,
+        size_m: float = 500.0,
+        resolution: int = 1024,
+    ) -> bytes:
+        """8-bit RGB diffuse texture for the terrain mesh.
+
+        Each texel is coloured by the Viridis depth colormap (matching the live
+        3D/top-down views: shallow → yellow, deep → purple), then modulated by a
+        fractal noise + speckle pattern so the surface reads as textured rather
+        than a flat colour ramp.  Referenced from terrain.mtl as ``map_Kd`` and
+        sampled by the OBJ's ``vt`` coordinates.
+
+        The image is written north-up (row 0 = max y) so it aligns with the
+        OBJ texture coordinates under the standard bottom-left UV origin.
+        """
+        import struct, zlib
+
+        half = size_m / 2.0
+        xs   = np.linspace(cx - half, cx + half, resolution)       # +x → cols
+        ys   = np.linspace(cy + half, cy - half, resolution)       # row 0 = +y
+
+        # Positive-up heights; row 0 corresponds to max y (north-up).
+        zz    = -self._sample_terrain_grid(xs, ys)
+        z_min = float(zz.min()); z_max = float(zz.max())
+        z_rng = z_max - z_min if z_max > z_min else 1.0
+
+        # Base colour: shallow (high z) → yellow (t=1), deep → purple (t=0).
+        t   = (zz - z_min) / z_rng
+        rgb = _viridis_rgb(t)                                       # (R, C, 3)
+
+        # Texture overlay: smooth fractal mottling plus fine speckle, combined
+        # into a brightness factor in ~[0.78, 1.18].  Seed is derived from the
+        # exported extent so a given region textures reproducibly.
+        seed    = int(abs(cx) * 7 + abs(cy) * 13 + size_m) & 0x7FFFFFFF
+        noise   = _fractal_noise((resolution, resolution), octaves=5, seed=seed)
+        speckle = np.random.default_rng(seed + 1).random((resolution, resolution))
+        tex     = 0.72 * noise + 0.28 * speckle                    # [0, 1]
+        shade   = 0.78 + 0.40 * tex                                # brightness
+
+        rgb = np.clip(rgb * shade[..., None], 0, 255).astype(np.uint8)
+
+        # Write 8-bit RGB PNG (colour type 2), no PIL dependency.
+        def chunk(tag: bytes, data: bytes) -> bytes:
+            raw = tag + data
+            return (struct.pack('>I', len(data)) + raw
+                    + struct.pack('>I', zlib.crc32(raw) & 0xFFFFFFFF))
+
+        ihdr = chunk(b'IHDR',
+                     struct.pack('>IIBBBBB', resolution, resolution, 8, 2, 0, 0, 0))
+
+        row_w = resolution * 3
+        raw   = bytearray(resolution * (1 + row_w))
+        for iy in range(resolution):
+            start = iy * (1 + row_w)
+            raw[start] = 0                                          # filter None
+            raw[start + 1: start + 1 + row_w] = rgb[iy].tobytes()
+
+        return (b'\x89PNG\r\n\x1a\n'
+                + ihdr
+                + chunk(b'IDAT', zlib.compress(bytes(raw), 6))
+                + chunk(b'IEND', b''))
 
     async def sim_loop(self):
         """Main simulation loop — steps sim and broadcasts state."""
@@ -1374,22 +1530,29 @@ class VisualizerServer3D:
                 cx     = fnum('cx', 0.0)
                 cy     = fnum('cy', 0.0)
                 size_m = fnum('size', 500.0)
+                name   = _sanitize_export_name(qs.get('name', [None])[0])
 
                 try:
                     if path == '/export/terrain.obj':
                         body = server._export_terrain_obj(
-                            cx, cy, size_m, dx_m=fnum('step', 2.0))
-                        self_._send(body, 'model/obj', 'terrain.obj')
+                            cx, cy, size_m, dx_m=fnum('step', 2.0), name=name)
+                        self_._send(body, 'model/obj', f'{name}.obj')
                         return
                     if path == '/export/terrain.mtl':
-                        self_._send(server._export_terrain_mtl(),
-                                    'model/mtl', 'terrain.mtl')
+                        self_._send(server._export_terrain_mtl(name),
+                                    'model/mtl', f'{name}.mtl')
                         return
                     if path == '/export/terrain_heightmap.png':
                         res = int(fnum('res', 513))
                         png, _zmin, _zmax = server._export_terrain_png(
+                            cx, cy, size_m, resolution=res, name=name)
+                        self_._send(png, 'image/png', f'{name}_heightmap.png')
+                        return
+                    if path == '/export/terrain_diffuse.png':
+                        res = int(fnum('texres', 1024))
+                        png = server._export_terrain_diffuse_png(
                             cx, cy, size_m, resolution=res)
-                        self_._send(png, 'image/png', 'terrain_heightmap.png')
+                        self_._send(png, 'image/png', f'{name}_diffuse.png')
                         return
                 except Exception as exc:  # noqa: BLE001
                     msg = f'Export failed: {exc}'.encode()

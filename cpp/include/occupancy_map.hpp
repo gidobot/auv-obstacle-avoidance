@@ -169,6 +169,8 @@ struct OccupancyMapConfig {
     double dz            = 0.25;
     double horizon_fwd   = 15.0;
     double horizon_back  = 15.0;
+    /// The grid spans [vehicle_z - z_half_range, vehicle_z + z_half_range]
+    /// and shifts with the vehicle to keep it centred.
     double z_half_range  = 20.0;
 
     // Vehicle parameters
@@ -182,13 +184,27 @@ struct OccupancyMapConfig {
     double obstacle_threshold    = 1.0;
 
     double altitude_overshoot_threshold_m  = 1.0;
+    /// Hysteresis on top of altitude_overshoot_threshold_m when choosing
+    /// OBSTACLE_CLEAR vs ALT_FOLLOW vs ALT_CORRECTION.  Once in an in-place
+    /// vertical transect mode, retain it until commanded depth agrees with the
+    /// vehicle depth within roughly (threshold - hysteresis); damps chatter
+    /// when noisy manifold/DVL jitter steps cmd_depth[cx] across the
+    /// threshold (common on procedural / rugose reef terrain).
     double altitude_overshoot_hysteresis_m = 0.5;
 
-    // Stale-observation heading gate
+    /// Stale-observation heading gate.  Any occupied voxel whose stored
+    /// observation heading differs from the current vehicle heading by more
+    /// than this threshold is reset to prior probability.  Prevents filled
+    /// voxels from a previous heading from triggering obstacle-avoidance on a
+    /// new heading where that space is actually clear.
     double stale_heading_threshold_deg = 45.0;
 
     // Safety clearance
+    /// Minimum horizontal clearance behind the vehicle, from manifold geometry
+    /// in the tail depth band, before descent is allowed.
     double safety_standoff_m = 2.0;
+    /// Depth band used by the tail-clearance check: structure within
+    /// [v_z, v_z + safety_below_m) below the vehicle counts as a tail threat.
     double safety_below_m    = 1.0;
 
     // Occupancy probability
@@ -481,15 +497,28 @@ private:
     Eigen::MatrixXd voxel_heading_; // (nz, nx) — NaN for unobserved
 
     double grid_origin_x_;
+    /// Grid origin in world Z (depth) — row 0 corresponds to this depth.
+    /// Shifts with the vehicle so the vehicle stays centred in the window.
     double grid_origin_z_;
     double shift_accum_;
     double shift_accum_z_;
 
     Eigen::VectorXi manifold_iz_;       // length nx
     Eigen::VectorXd manifold_z_;        // length nx
+    /// Parallel "is this column based on a real observation" flag.  False
+    /// where manifold_z_ is the grid-bottom default — those columns are truly
+    /// unknown, and the planner's obstacle-avoidance checks (climb, cliff
+    /// drop, tail clearance) must skip transitions involving them to avoid
+    /// false triggers from observed->default discontinuities.  True for direct
+    /// observations AND forward-extended ahead columns (both reflect real
+    /// terrain knowledge).
     std::vector<bool> manifold_observed_; // length nx
     Eigen::VectorXd cmd_depth_;         // length nx
 
+    /// Grid origin that was in effect when manifold_z_ was last computed.
+    /// Kept separately from grid_origin_x_ so a visualizer can map
+    /// manifold_z_[i] -> world_x = manifold_grid_origin_x_ + i * dx even after
+    /// advance() has shifted grid_origin_x_ forward by one column.
     double manifold_grid_origin_x_;
     double dvl_altitude_;
     std::string control_mode_;

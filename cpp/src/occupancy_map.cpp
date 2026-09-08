@@ -377,6 +377,8 @@ void OccupancyMap::update_sonar(
 
 void OccupancyMap::build_cliff_manifold() {
     const auto& c = cfg_;
+    // Snapshot the origin now so a visualizer can correctly map
+    // manifold_z_[i] -> world_x after advance() has shifted grid_origin_x_.
     manifold_grid_origin_x_ = grid_origin_x_;
 
     int    bottom_iz = nz_ - 1;
@@ -406,7 +408,8 @@ void OccupancyMap::build_cliff_manifold() {
         }
     }
 
-    // Pass 3 — at and ahead of vehicle: observation, then forward-extend, then default.
+    // Pass 3 — at and ahead of the vehicle: observation, else forward-extend
+    // from the last ahead observation, else grid-bottom default.
     int last_iz = -1;
     for (int ix = cx_; ix < nx_; ++ix) {
         if (observed_iz[ix] >= 0) {
@@ -469,6 +472,9 @@ OccupancyMap::ObstacleResult OccupancyMap::forward_obstacle(
     return {true, peak_z, grid_to_world_x(peak_ix)};
 }
 
+// Safety tail-check: find the first column behind the vehicle whose manifold
+// segment crosses the depth band [v_z, v_z + safety_below_m) within
+// (safety_standoff_m + vehicle_length/2) behind the centre.
 bool OccupancyMap::safety_tail_blocked(double vehicle_depth) const {
     const auto& c = cfg_;
     double v_x    = grid_to_world_x(cx_);
@@ -558,6 +564,11 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
         double dvl_cmd = std::max(0.0, vehicle_depth + dvl_altitude_ - c.imaging_altitude);
         cmd_depth_[cx_] = std::max(dvl_cmd, cmd_depth_[cx_]);
     } else if (!manifold_observed_[cx_]) {
+        // No DVL lock and no real manifold observation at the vehicle column
+        // (the grid defaults to bottom depth).  Do not command a dive to the
+        // depth-window floor — that would force ALT_CORRECTION with zero
+        // forward motion.  Hold at the current depth until the DVL or the
+        // occupancy grid sees seafloor.
         cmd_depth_[cx_] = std::max(0.0, vehicle_depth);
     }
 
@@ -573,6 +584,14 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
     // ----- Step 2b: forward-obstacle detection -----
     auto obs = forward_obstacle(vehicle_depth, vehicle_world_x);
     if (obs.found) {
+        // Deliberately not clamped to 0.  If peak_z - imaging_altitude is
+        // negative the obstacle top is above the water surface, and the
+        // vehicle will try to ascend past it while the platform's z >= 0 limit
+        // holds it there.  That is the intended terminal behaviour on a slope
+        // too steep to traverse: the controller fails safe at the surface
+        // rather than commanding a depth that would take the vehicle through
+        // terrain.  It is the one state the planner does not exit on its own —
+        // escaping it is an operator/mission-level decision.
         double new_target_z = obs.peak_z - c.imaging_altitude;
         if (!cliff_top_committed_) {
             cliff_top_committed_ = true;
@@ -664,6 +683,8 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
     }
 
     // ----- Mode selection -----
+    // Tail clearance overrides altitude follow / correction only; the forward
+    // obstacle latch (which returns earlier) and OBSTACLE_CLEAR are unchanged.
     set_mode_from_cmd_depth(vehicle_depth);
     if (safety_tail_blocked(vehicle_depth) &&
         (control_mode_ == "ALT_FOLLOW" || control_mode_ == "ALT_CORRECTION")) {

@@ -209,6 +209,7 @@ class Simulator:
         sonar_hz: float = 1.0,
         control_hz: float = 10.0,
         debug: bool = True,
+        mapper_factory=None,
         enable_dvl: bool = True,
         enable_altimeter: bool = True,
         enable_sonar: bool = True,
@@ -219,7 +220,11 @@ class Simulator:
         self.dvl = dvl_config or DVLConfig()
         self.sonar = sonar_config or SonarConfig()
         self.altimeter = altimeter_config or AltimeterConfig()
-        self.mapper = ObstacleMapper(
+        # mapper_factory lets a research baseline be swapped in for the deployed
+        # controller without touching the sensor simulation — see
+        # task_priority_baseline.py and compare_controllers.py.
+        factory = mapper_factory or ObstacleMapper
+        self.mapper = factory(
             omap_config or OccupancyMapConfig(),
             self.dvl,
             self.sonar,
@@ -375,6 +380,8 @@ class Simulator:
 
         # 4. Control tick — runs at control_hz, independent of sensor rates
         if self.time >= self._ctrl_last_t + self._ctrl_period:
+            if hasattr(self.mapper, 'tick'):
+                self.mapper.tick(self._ctrl_period)
             self.mapper.update_pose(pose)
             ctrl_alt = self.mapper.get_altitude()
             ctrl_cmd = self.mapper.get_control()
@@ -1109,6 +1116,7 @@ class Simulator3D:
         sonar_hz: float = 1.0,
         control_hz: float = 10.0,
         debug: bool = True,
+        mapper_factory=None,
         enable_dvl: bool = True,
         enable_altimeter: bool = True,
         enable_sonar: bool = True,
@@ -1122,7 +1130,11 @@ class Simulator3D:
         self.altimeter = altimeter_config or AltimeterConfig()
 
         cfg = omap_config or OccupancyMapConfig()
-        self.mapper = ObstacleMapper(cfg, self.dvl, self.sonar, self.altimeter)
+        # mapper_factory lets a research baseline be swapped in for the deployed
+        # controller without touching the sensor simulation — see
+        # task_priority_baseline.py and compare_controllers.py.
+        factory = mapper_factory or ObstacleMapper
+        self.mapper = factory(cfg, self.dvl, self.sonar, self.altimeter)
         self._Pose                 = Pose
         self._SensorType           = SensorType
         self._DVLMeasurement       = DVLMeasurement
@@ -1383,6 +1395,8 @@ class Simulator3D:
 
         # 5. Control tick — runs at control_hz, independent of sensor rates
         if self.time >= self._ctrl_last_t + self._ctrl_period:
+            if hasattr(self.mapper, 'tick'):
+                self.mapper.tick(self._ctrl_period)
             self.mapper.update_pose(pose)
             ctrl_alt = self.mapper.get_altitude()
             ctrl_cmd = self.mapper.get_control()

@@ -9,6 +9,13 @@ paper needs:
     tp+dwell    set-based task priority with activation dwell, i.e. commitment
                 reintroduced inside the task-priority formalism
 
+Objective
+---------
+The survey exists to image the seafloor from a fixed altitude, so the figure of
+merit is time held at that altitude with safe standoff — not ground covered.
+Stopping to ascend or descend onto altitude before moving on is correct, and
+the metrics below score it that way.
+
 Mission
 -------
 A 4-leg lawnmower flown across a 70-degree sawtooth ridge field: 20 m teeth on a
@@ -114,8 +121,17 @@ CONTROLLERS = {
 
 # -- run + metrics -----------------------------------------------------------
 
-def run(controller, cfg, dt=0.1, margin_s=120.0):
-    """Fly the whole lawnmower; return clearance / altitude / transition stats."""
+def run(controller, cfg, dt=0.1, margin_s=120.0, alt_tol=0.5):
+    """Fly the whole lawnmower; return time-on-altitude and safety stats.
+
+    The survey objective is to spend as much of the mission as possible at the
+    imaging altitude while keeping safe standoff — not to cover ground quickly.
+    Halting to ascend or descend onto altitude before moving on is the correct
+    behaviour, so pattern coverage is not a figure of merit and is not reported
+    as one.  What matters is time held on altitude, and the along-track distance
+    flown while on altitude, which is the usable survey line the mission exists
+    to acquire.
+    """
     terrain, traj, _ = build_mission(cfg.survey_speed)
     sim = Simulator3D(
         omap_config=cfg,
@@ -140,6 +156,9 @@ def run(controller, cfg, dt=0.1, margin_s=120.0):
     collided, first_collision = False, math.nan
     on_survey = False
     descent_steps = 0
+    on_alt_cycles = 0
+    dist_on_alt = 0.0
+    prev_arc = 0.0
 
     for _ in range(steps):
         sim.step(dt)
@@ -162,8 +181,14 @@ def run(controller, cfg, dt=0.1, margin_s=120.0):
             continue
 
         clearance.append(clr)
+        d_arc = max(0.0, float(sim.arc_length) - prev_arc)
+        prev_arc = float(sim.arc_length)
         if np.isfinite(nadir):
-            alt_err.append(nadir - cfg.imaging_altitude)
+            err = nadir - cfg.imaging_altitude
+            alt_err.append(err)
+            if abs(err) <= alt_tol:
+                on_alt_cycles += 1
+                dist_on_alt += d_arc
         if clr <= 0.0 and not collided:
             collided, first_collision = True, float(getattr(sim, 'arc_length', math.nan))
         mode = getattr(sim.mapper, 'control_mode', None) or sim.mapper.omap.control_mode
@@ -176,9 +201,13 @@ def run(controller, cfg, dt=0.1, margin_s=120.0):
                 'steps': steps, 'descent_s': descent_steps * dt,
                 'note': 'never reached survey altitude'}
     clearance = np.asarray(clearance, dtype=float)
+    n = len(clearance)
     return {
         'descent_s':     descent_steps * dt,
         'controller':    controller,
+        'on_alt_pct':    100.0 * on_alt_cycles / n if n else math.nan,
+        'dist_on_alt':   dist_on_alt,
+        'survey_s':      n * dt,
         'min_clearance': float(np.nanmin(clearance)),
         'p05_clearance': float(np.nanpercentile(clearance, 5)),
         'alt_rms':       float(np.sqrt(np.mean(np.square(alt_err)))) if alt_err else math.nan,
@@ -192,14 +221,14 @@ def run(controller, cfg, dt=0.1, margin_s=120.0):
 
 def header(title):
     print(f"\n{title}")
-    print(f"  {'controller':<10} {'min clr':>8} {'p05 clr':>8} {'alt rms':>8} "
-          f"{'<0.5m':>6} {'trans':>6} {'collision':>11}")
-    print(f"  {'-'*10} {'-'*8} {'-'*8} {'-'*8} {'-'*6} {'-'*6} {'-'*11}")
+    print(f"  {'controller':<10} {'t@alt %':>8} {'d@alt m':>8} {'alt rms':>8} "
+          f"{'min clr':>8} {'<0.5m':>6} {'collision':>11}")
+    print(f"  {'-'*10} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*6} {'-'*11}")
 
 def show(r):
     coll = f"s={r['collision_s']:.0f}m" if r['collided'] else "-"
-    print(f"  {r['controller']:<10} {r['min_clearance']:8.3f} {r['p05_clearance']:8.3f} "
-          f"{r['alt_rms']:8.3f} {r['breaches']:6d} {r['transitions']:6d} {coll:>11}")
+    print(f"  {r['controller']:<10} {r['on_alt_pct']:8.1f} {r['dist_on_alt']:8.1f} "
+          f"{r['alt_rms']:8.3f} {r['min_clearance']:8.3f} {r['breaches']:6d} {coll:>11}")
 
 
 # -- sweeps ------------------------------------------------------------------
@@ -259,10 +288,14 @@ def main():
             w.writeheader(); w.writerows(rows)
         print(f"\nwrote {args.csv}")
 
-    print("\nmin clr = worst clearance over the hull (m); <= 0 is a collision.")
-    print("p05 clr = 5th-percentile hull clearance - how close it runs habitually.")
-    print("<0.5m   = control cycles spent inside half a metre of terrain.")
+    print("\nt@alt % = share of survey time held within 0.5 m of imaging altitude.")
+    print("d@alt m = along-track distance flown while on altitude - the usable")
+    print("          survey line acquired.  This is the figure of merit.")
     print("alt rms = RMS deviation from the imaging altitude (m).")
+    print("min clr = worst clearance over the hull (m); <= 0 is a collision.")
+    print("<0.5m   = control cycles spent inside half a metre of terrain.")
+    print("Pattern coverage is deliberately not scored: halting to reach")
+    print("altitude before moving on is correct behaviour for this survey.")
     return 0
 
 

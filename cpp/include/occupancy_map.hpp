@@ -473,6 +473,13 @@ public:
     double manifold_grid_origin_x() const { return manifold_grid_origin_x_; }
     double dvl_altitude()        const { return dvl_altitude_; }
 
+    /// Latest valid altimeter vertical range, or NaN after a no-return.
+    /// Recorded here (as well as on ObstacleMapper) because the planner needs a
+    /// direct altitude measurement that survives a heading change wiping the
+    /// map.  ObstacleMapper keeps the two in step.
+    double altimeter_altitude()  const { return altimeter_altitude_; }
+    void   set_altimeter_altitude(double v) { altimeter_altitude_ = v; }
+
     /// Overwrite the cached DVL altitude.  Intended for modelling a sensor
     /// dropout — the map normally maintains this itself from beam returns, and
     /// NaNs it when no beam reports a bottom lock.
@@ -521,6 +528,7 @@ private:
     /// advance() has shifted grid_origin_x_ forward by one column.
     double manifold_grid_origin_x_;
     double dvl_altitude_;
+    double altimeter_altitude_;
     std::string control_mode_;
 
     std::vector<std::pair<double, double>> path_waypoints_;
@@ -596,8 +604,12 @@ public:
 
     /// Overwrite the cached altimeter altitude.  As with
     /// OccupancyMap::set_dvl_altitude, this exists to model a sensor dropout;
-    /// normal operation maintains it from altimeter measurements.
-    void set_altimeter_altitude(double v) { altimeter_altitude_ = v; }
+    /// normal operation maintains it from altimeter measurements.  Clears the
+    /// map's copy too, which the planner reads.
+    void set_altimeter_altitude(double v) {
+        altimeter_altitude_ = v;
+        omap_.set_altimeter_altitude(v);
+    }
 
     /// Return the current obstacle avoidance command.
     ///

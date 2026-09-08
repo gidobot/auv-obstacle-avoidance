@@ -138,7 +138,7 @@ def test_flat_terrain_holds_imaging_altitude():
     settled = cmds[10:]
     # ANALYTIC — over flat terrain at 20 m with imaging_altitude 2 m, the
     # commanded depth must converge to 18 m and stay there.
-    assert all(abs(c - 18.0) < 0.2 for c in settled), \
+    assert all(abs(c - 18.0) < 0.05 for c in settled), \
         f"cmd_depth should hold ~18.0 over flat terrain, got {settled[:6]}"
     assert set(modes[10:]) <= {'ALT_FOLLOW'}, \
         f"flat terrain at target altitude should stay ALT_FOLLOW, saw {set(modes[10:])}"
@@ -172,13 +172,22 @@ def test_cliff_run():
     assert 'OBSTACLE_CLEAR' in modes, "step cliff did not trigger OBSTACLE_CLEAR"
     assert modes.index('OBSTACLE_CLEAR') >= 15, \
         "OBSTACLE_CLEAR before the cliff is in range — detection fired too early"
+    # The conservative vehicle-column rule must never command a dive before the
+    # hull footprint has been observed: no ALT_CORRECTION on the opening cycles.
+    assert 'ALT_CORRECTION' not in modes[:5], \
+        f"dived before observing terrain under the hull: {modes[:5]}"
 
-    # BASELINE — captured with the Python prototype still present and agreeing
-    # exactly.  A change here is a behaviour change; make it deliberately.
-    assert mode_runs(modes) == [('ALT_CORRECTION', 2), ('ALT_FOLLOW', 18),
-                                ('OBSTACLE_CLEAR', 40)], \
+    # BASELINE — re-captured when the vehicle-column command became the most
+    # conservative of the hull-footprint manifold and the latest direct
+    # altitude return.  Two changes from the previous baseline, both expected:
+    # the run no longer opens with two ALT_CORRECTION cycles (the old rule dove
+    # on a manifold default before anything under the hull had been observed),
+    # and settled commands sit exactly on the imaging altitude rather than
+    # ~0.07 m below it.  A change here is a behaviour change; make it
+    # deliberately and say why.
+    assert mode_runs(modes) == [('ALT_FOLLOW', 20), ('OBSTACLE_CLEAR', 40)], \
         f"mode sequence changed: {mode_runs(modes)}"
-    for idx, want in [(10, 18.0661), (19, 18.0), (20, 16.0), (59, 16.0)]:
+    for idx, want in [(10, 18.0), (19, 17.4095), (20, 16.0), (59, 16.0)]:
         assert abs(cmds[idx] - want) < 1e-3, \
             f"cmd_depth[{idx}]={cmds[idx]:.4f}, baseline {want}"
     print(f"  mode runs: {mode_runs(modes)}")

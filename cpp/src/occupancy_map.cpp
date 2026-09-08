@@ -79,6 +79,7 @@ OccupancyMap::OccupancyMap(const OccupancyMapConfig& cfg)
 
     manifold_grid_origin_x_ = 0.0;
     dvl_altitude_           = kNaN;
+    altimeter_altitude_     = kNaN;
     control_mode_           = "ALT_FOLLOW";
     path_waypoints_         = {};
 
@@ -108,6 +109,7 @@ void OccupancyMap::reset(double vehicle_world_x, double vehicle_depth) {
     path_waypoints_.clear();
 
     dvl_altitude_  = kNaN;
+    altimeter_altitude_ = kNaN;
     control_mode_  = "ALT_FOLLOW";
 
     cliff_top_committed_ = false;
@@ -315,6 +317,10 @@ void OccupancyMap::update_altimeter_ray(
         grid_(iz, ix) = std::max(c.altimeter_min_occ, grid_(iz, ix) - c.altimeter_miss_prob);
         voxel_heading_(iz, ix) = vehicle_heading;
     }
+
+    // Keep the latest direct vertical range for the planner.  A no-return
+    // clears it rather than leaving a stale value in place.
+    altimeter_altitude_ = hit ? range_m : kNaN;
 }
 
 void OccupancyMap::update_sonar(
@@ -557,20 +563,61 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
             cmd_depth_[ix] = std::max(0.0, z - c.imaging_altitude);
         }
     }
-    // Vehicle column override — DVL can deepen cmd_depth (early descent on
-    // rising terrain) but must not shallow it; a cliff-wall hit producing a
-    // tiny dvl_altitude must not create a spurious OBSTACLE_CLEAR ascent.
-    if (!std::isnan(dvl_altitude_)) {
-        double dvl_cmd = std::max(0.0, vehicle_depth + dvl_altitude_ - c.imaging_altitude);
-        cmd_depth_[cx_] = std::max(dvl_cmd, cmd_depth_[cx_]);
-    } else if (!manifold_observed_[cx_]) {
-        // No DVL lock and no real manifold observation at the vehicle column
-        // (the grid defaults to bottom depth).  Do not command a dive to the
-        // depth-window floor — that would force ALT_CORRECTION with zero
-        // forward motion.  Hold at the current depth until the DVL or the
-        // occupancy grid sees seafloor.
-        cmd_depth_[cx_] = std::max(0.0, vehicle_depth);
+    // Vehicle column: the most conservative command the current knowledge
+    // supports.  Two sources, and the shallower wins.
+    //
+    //   (a) the shallowest observed manifold across the whole hull footprint,
+    //       not the single column under the origin.  On a slope the stern or
+    //       bow sits over terrain the nadir column knows nothing about, and
+    //       commanding to the nadir alone descends one end into the seabed.
+    //
+    //   (b) the latest direct vertical range — DVL min-across-beams, or the
+    //       altimeter.  A current measurement is fresher than the manifold and
+    //       survives a heading change that invalidates the map, so it must be
+    //       able to override a manifold-derived command whenever it is the
+    //       safer of the two.
+    //
+    // This deliberately reverses an earlier rule that let the DVL deepen the
+    // command but never shallow it.  That rule protected survey throughput — a
+    // forward Janus beam striking a cliff wall returns a short range, which
+    // under this rule commands an ascent and stops forward motion.  Safety wins
+    // that trade: an unnecessary climb costs survey time, descending onto
+    // terrain does not fail gracefully.
+    int half_bins = static_cast<int>(std::ceil(c.vehicle_length / (2.0 * c.dx)));
+    int foot_lo   = std::max(0, cx_ - half_bins);
+    int foot_hi   = std::min(nx_ - 1, cx_ + half_bins);
+    double foot_z = kNaN;
+    for (int i = foot_lo; i <= foot_hi; ++i) {
+        if (!manifold_observed_[i]) continue;          // unobserved => grid floor
+        double z = manifold_z_[i];
+        if (std::isnan(z)) continue;
+        if (std::isnan(foot_z) || z < foot_z) foot_z = z;
     }
+
+    double measured_alt = dvl_altitude_;
+    if (!std::isnan(altimeter_altitude_)) {
+        measured_alt = std::isnan(measured_alt)
+                     ? altimeter_altitude_
+                     : std::min(measured_alt, altimeter_altitude_);
+    }
+
+    double vcmd = kNaN;
+    if (!std::isnan(foot_z)) {
+        vcmd = std::max(0.0, foot_z - c.imaging_altitude);
+    }
+    if (!std::isnan(measured_alt)) {
+        double mcmd = std::max(0.0, vehicle_depth + measured_alt - c.imaging_altitude);
+        vcmd = std::isnan(vcmd) ? mcmd : std::min(vcmd, mcmd);
+    }
+    if (std::isnan(vcmd)) {
+        // Neither a direct return nor a real manifold observation anywhere under
+        // the hull (the grid defaults to bottom depth).  Do not command a dive
+        // to the depth-window floor — that would force ALT_CORRECTION with zero
+        // forward motion.  Hold at the current depth until something sees
+        // seafloor.
+        vcmd = std::max(0.0, vehicle_depth);
+    }
+    cmd_depth_[cx_] = vcmd;
 
     // ----- Step 2a: release latch if past tracked obstacle + margin -----
     if (cliff_top_committed_ && vehicle_world_x >= cliff_top_release_x_) {
@@ -994,6 +1041,7 @@ void ObstacleMapper::update_sensor(SensorType /*type*/, const AltimeterMeasureme
 
     bool valid = meas.hit && (meas.range_m < altimeter_config_.max_range - 0.05);
     altimeter_altitude_ = valid ? meas.range_m : kNaN;
+    omap_.set_altimeter_altitude(altimeter_altitude_);
 
     omap_.update_altimeter_ray(meas.range_m, pose.depth, fwd_x,
                                meas.hit, 0.15, pose.heading);

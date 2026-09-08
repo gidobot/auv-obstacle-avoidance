@@ -15,7 +15,7 @@ usage() {
     echo ""
     echo "  --clean   Remove build directory before building"
     echo "  --debug   Build with Debug configuration"
-    echo "  --test    Run test_cpp.py after a successful build"
+    echo "  --test    Run test_occupancy_map.py after a successful build"
     echo ""
     echo "  PYTHON=<path>  Build against a specific interpreter"
     exit 1
@@ -61,5 +61,5 @@ if [[ $RUN_TESTS -eq 1 ]]; then
     echo ""
     echo "Running tests..."
     cd "$SCRIPT_DIR"
-    "$PYTHON" test_cpp.py
+    "$PYTHON" test_occupancy_map.py
 fi

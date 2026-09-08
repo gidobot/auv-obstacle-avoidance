@@ -68,7 +68,7 @@ A convenience script in the repo root handles configure, build, and install in o
 ./build.sh            # Release build
 ./build.sh --debug    # Debug build
 ./build.sh --clean    # Wipe build dir first, then build
-./build.sh --test     # Build then run test_cpp.py
+./build.sh --test     # Build then run test_occupancy_map.py
 ```
 
 The extension is built for whichever interpreter is first on `PATH` — activate
@@ -95,9 +95,11 @@ cmake --install build
 
 The install step copies the compiled `occupancy_map_cpp.so` module into the repo root, making it importable alongside the Python implementation.
 
-`test_cpp.py` runs the same missions through both implementations and asserts
-they agree — run it after any change to either backend, since the two are
-maintained in parallel and silently diverge otherwise.
+`test_occupancy_map.py` exercises the extension module directly — run it after
+any change to the core.  It separates analytic assertions (ground truth derived
+from the scenario) from frozen baselines (the behaviour as of vehicle
+validation); a baseline change is not automatically wrong, but must be
+deliberate.
 
 ### Targets
 
@@ -145,9 +147,8 @@ algorithm running on the vehicle is exactly the revision recorded by the
 submodule pointer.
 
 Changes needed by the vehicle must land **here** and the submodule pointer be
-bumped there — never edited in the consuming repo.  That is what keeps the C++
-core, the Python reference implementation in `occupancy_map.py`, and the
-`test_cpp.py` parity check in agreement.
+bumped there — never edited in the consuming repo.  The C++ core is the single
+implementation of the algorithm; `test_occupancy_map.py` is what guards it.
 
 ---
 
@@ -155,9 +156,20 @@ core, the Python reference implementation in `occupancy_map.py`, and the
 
 | File | Description |
 |------|-------------|
-| `occupancy_map.py` | Core `OccupancyMap` class — voxel grid, sensor updates, manifold extraction, path planning. Designed to be pulled into an existing control framework. |
+| `cpp/` | The algorithm: `OccupancyMap` / `ObstacleMapper` — voxel grid, sensor updates, manifold extraction, path planning. The design notes live in `cpp/include/occupancy_map.hpp`. |
+| `cpp/python/bindings.cpp` | pybind11 bindings exposing that core to Python as `occupancy_map_cpp`. |
 | `simulator.py` | Simulation environment with synthetic terrain, DVL/sonar sensor models, and vehicle motion along the planned path. |
 | `visualizer.py` | Browser-based real-time visualizer using WebSocket streaming. |
+| `lcm_playback_visualizer.py` | Replays an LCM log (or a live feed) through the mapper; mirrors `oa_mapper.cpp`'s sensor gating. |
+| `test_occupancy_map.py` | Behavioural tests for the core. |
+
+> A Python implementation of the algorithm (`occupancy_map.py`) was maintained
+> alongside the C++ as the original prototype.  It was removed once the C++ was
+> validated on the vehicle: keeping two hand-written implementations in step had
+> cost real bugs, and the parity suite that was supposed to catch them asserted
+> only that the two agreed, never that either was correct.  The simulator and
+> visualizers remain in Python and drive the core through the extension module.
+> `git log -- occupancy_map.py` still has it if the reference is ever wanted.
 
 ## Quick Start
 
@@ -177,20 +189,22 @@ python simulator.py
 
 ### Use in your own code
 
+Build the extension first (`./build.sh`), then:
+
 ```python
-from occupancy_map import OccupancyMap, OccupancyMapConfig
+from occupancy_map_cpp import OccupancyMap, OccupancyMapConfig
 import numpy as np
 
-# Configure
-config = OccupancyMapConfig(
-    dx=0.5,                 # X bin size (m)
-    dz=0.25,                # Z bin size (m)
-    horizon_fwd=15.0,       # Forward look-ahead (m)
-    horizon_back=15.0,      # Backward look-behind (m)
-    vehicle_length=2.0,     # Vehicle length for tail clearance (m)
-    imaging_altitude=2.0,   # Target altitude above seafloor (m)
-    cliff_standoff=2.0,     # Climb trigger distance before cliff (m)
-)
+# Configure.  The binding exposes plain attributes rather than a keyword
+# constructor, so set what you need after default-constructing.
+config = OccupancyMapConfig()
+config.dx               = 0.5    # X bin size (m)
+config.dz               = 0.25   # Z bin size (m)
+config.horizon_fwd      = 15.0   # Forward look-ahead (m)
+config.horizon_back     = 15.0   # Backward look-behind (m)
+config.vehicle_length   = 2.0    # Vehicle length for tail clearance (m)
+config.imaging_altitude = 2.0    # Target altitude above seafloor (m)
+config.cliff_standoff   = 2.0    # Climb trigger distance before cliff (m)
 
 omap = OccupancyMap(config)
 omap.reset(vehicle_world_x=0.0, vehicle_depth=18.0)

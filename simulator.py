@@ -15,7 +15,7 @@ import math
 import numpy as np
 from collections import deque
 from typing import Optional, Callable
-from occupancy_map import (
+from occupancy_map_cpp import (
     OccupancyMap, OccupancyMapConfig,
     DVLConfig, SonarConfig, AltimeterConfig,
     Pose, SensorType, DVLMeasurement, AltimeterMeasurement, SonarMeasurement,
@@ -1109,7 +1109,6 @@ class Simulator3D:
         sonar_hz: float = 1.0,
         control_hz: float = 10.0,
         debug: bool = True,
-        use_cpp_backend: bool = False,
         enable_dvl: bool = True,
         enable_altimeter: bool = True,
         enable_sonar: bool = True,
@@ -1123,32 +1122,13 @@ class Simulator3D:
         self.altimeter = altimeter_config or AltimeterConfig()
 
         cfg = omap_config or OccupancyMapConfig()
-        if use_cpp_backend:
-            try:
-                import occupancy_map_cpp as _cpp
-                cpp_cfg = _cpp.OccupancyMapConfig()
-                for attr, val in vars(cfg).items():
-                    if hasattr(cpp_cfg, attr):
-                        setattr(cpp_cfg, attr, val)
-                self.mapper = _cpp.ObstacleMapper(
-                    cpp_cfg, _cpp.DVLConfig(), _cpp.SonarConfig(), _cpp.AltimeterConfig()
-                )
-                self._Pose               = _cpp.Pose
-                self._SensorType         = _cpp.SensorType
-                self._DVLMeasurement     = _cpp.DVLMeasurement
-                self._AltimeterMeasurement = _cpp.AltimeterMeasurement
-                self._SonarMeasurement   = _cpp.SonarMeasurement
-                self._backend            = 'cpp'
-            except ImportError:
-                use_cpp_backend = False
-        if not use_cpp_backend:
-            self.mapper = ObstacleMapper(cfg, self.dvl, self.sonar, self.altimeter)
-            self._Pose               = Pose
-            self._SensorType         = SensorType
-            self._DVLMeasurement     = DVLMeasurement
-            self._AltimeterMeasurement = AltimeterMeasurement
-            self._SonarMeasurement   = SonarMeasurement
-            self._backend            = 'python'
+        self.mapper = ObstacleMapper(cfg, self.dvl, self.sonar, self.altimeter)
+        self._Pose                 = Pose
+        self._SensorType           = SensorType
+        self._DVLMeasurement       = DVLMeasurement
+        self._AltimeterMeasurement = AltimeterMeasurement
+        self._SonarMeasurement     = SonarMeasurement
+        self._backend              = 'cpp'
         self._dvl_period   = 1.0 / dvl_hz
         self._alt_period   = 1.0 / altimeter_hz
         self._sonar_period = 1.0 / sonar_hz
@@ -1198,11 +1178,9 @@ class Simulator3D:
         """Drop cached mapper altitude and footprint for a disabled sensor."""
         if sensor == 'dvl':
             self.dvl_hit_xy = [None] * len(self.dvl_hit_xy)
-            if self._backend == 'python':
-                self.mapper.omap.dvl_altitude = np.nan
+            self.mapper.omap.dvl_altitude = np.nan
         elif sensor == 'altimeter':
-            if self._backend == 'python':
-                self.mapper._altimeter_altitude = np.nan
+            self.mapper.set_altimeter_altitude(np.nan)
         elif sensor == 'sonar':
             self.sonar_hit_xy = None
 

@@ -303,7 +303,8 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
         .def_property_readonly("grid_origin_x",          &OccupancyMap::grid_origin_x)
         .def_property_readonly("grid_origin_z",          &OccupancyMap::grid_origin_z)
         .def_property_readonly("manifold_grid_origin_x", &OccupancyMap::manifold_grid_origin_x)
-        .def_property_readonly("dvl_altitude",           &OccupancyMap::dvl_altitude)
+        .def_property("dvl_altitude",
+                      &OccupancyMap::dvl_altitude, &OccupancyMap::set_dvl_altitude)
         .def_property_readonly("control_mode",           &OccupancyMap::control_mode)
         .def_property_readonly("shift_accum",            &OccupancyMap::shift_accum)
 
@@ -412,6 +413,9 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
             py::arg("sensor_type"), py::arg("measurement"), py::arg("pose"))
 
         .def("update_pose",  &ObstacleMapper::update_pose,  py::arg("pose"))
+        .def("set_altimeter_altitude", &ObstacleMapper::set_altimeter_altitude,
+             py::arg("value"),
+             "Overwrite the cached altimeter altitude (models a sensor dropout).")
         .def("get_control",  &ObstacleMapper::get_control)
         .def("get_altitude", &ObstacleMapper::get_altitude)
 

@@ -61,7 +61,7 @@ def _safe(v) -> Optional[float]:
         return None
 
 
-from occupancy_map import (
+from occupancy_map_cpp import (
     ObstacleMapper, OccupancyMapConfig,
     DVLConfig, SonarConfig, AltimeterConfig,
     Pose, SensorType,
@@ -532,7 +532,6 @@ class PlaybackServer:
         ws_port: int = 8083,
         initial_speed: float = 1.0,
         swap_xy: bool = False,
-        use_cpp_backend: bool = False,
         lcm_types_path: str = _DEFAULT_LCM_TYPES_PATH,
         sonar_max_range: Optional[float] = None,
         altimeter_max_range: Optional[float] = None,
@@ -557,32 +556,17 @@ class PlaybackServer:
         # Clients
         self.clients: set = set()
 
-        # Python DVLConfig kept for beam-geometry hit-XY visualisation regardless of backend
+        # DVLConfig kept for beam-geometry hit-XY visualisation
         self._dvl_cfg = DVLConfig()
 
-        # Build mapper and store backend-specific type constructors
+        # Build mapper and store type constructors
         omap_cfg = OccupancyMapConfig()
-        self._backend = 'python'
-        if use_cpp_backend:
-            try:
-                import occupancy_map_cpp as _cpp
-                cpp_cfg = _cpp.OccupancyMapConfig()
-                for attr, val in vars(omap_cfg).items():
-                    if hasattr(cpp_cfg, attr):
-                        setattr(cpp_cfg, attr, val)
-                self.mapper = _cpp.ObstacleMapper(
-                    cpp_cfg, _cpp.DVLConfig(), _cpp.SonarConfig(), _cpp.AltimeterConfig()
-                )
-                self._Pose                 = _cpp.Pose
-                self._SensorType           = _cpp.SensorType
-                self._DVLMeasurement       = _cpp.DVLMeasurement
-                self._AltimeterMeasurement = _cpp.AltimeterMeasurement
-                self._SonarMeasurement     = _cpp.SonarMeasurement
-                self._backend = 'cpp'
-                print("Using C++ backend")
-            except ImportError:
-                use_cpp_backend = False
-                print("C++ backend unavailable, falling back to Python")
+        self._backend = 'cpp'
+        self._Pose                 = Pose
+        self._SensorType           = SensorType
+        self._DVLMeasurement       = DVLMeasurement
+        self._AltimeterMeasurement = AltimeterMeasurement
+        self._SonarMeasurement     = SonarMeasurement
         # Sonar/altimeter configs kept as Python objects for threshold checks.
         # These must match the vehicle's bot_param values (e.g. cheryl.cfg
         # sonar_max_range / altimeter_max_range) or playback will classify
@@ -593,15 +577,9 @@ class PlaybackServer:
         self._alt_max_range   = (altimeter_max_range if altimeter_max_range is not None
                                  else AltimeterConfig().max_range)
 
-        if not use_cpp_backend:
-            self.mapper = ObstacleMapper(
-                omap_cfg, self._dvl_cfg, SonarConfig(), AltimeterConfig()
-            )
-            self._Pose                 = Pose
-            self._SensorType           = SensorType
-            self._DVLMeasurement       = DVLMeasurement
-            self._AltimeterMeasurement = AltimeterMeasurement
-            self._SonarMeasurement     = SonarMeasurement
+        self.mapper = ObstacleMapper(
+            omap_cfg, self._dvl_cfg, SonarConfig(), AltimeterConfig()
+        )
 
         # Tracked vehicle state (updated from ACFR_NAV)
         self._nav_x: float = 0.0
@@ -1033,20 +1011,10 @@ class PlaybackServer:
                     self._height_map[:] = np.nan
                     self._hmap_dirty = False
                     self._terrain_map_msg = self._build_terrain_map_msg()
-                    omap_cfg = OccupancyMapConfig()
-                    if self._backend == 'cpp':
-                        import occupancy_map_cpp as _cpp
-                        cpp_cfg = _cpp.OccupancyMapConfig()
-                        for attr, val in vars(omap_cfg).items():
-                            if hasattr(cpp_cfg, attr):
-                                setattr(cpp_cfg, attr, val)
-                        self.mapper = _cpp.ObstacleMapper(
-                            cpp_cfg, _cpp.DVLConfig(), _cpp.SonarConfig(), _cpp.AltimeterConfig()
-                        )
-                    else:
-                        self.mapper = ObstacleMapper(
-                            omap_cfg, self._dvl_cfg, SonarConfig(), AltimeterConfig()
-                        )
+                    self.mapper = ObstacleMapper(
+                        OccupancyMapConfig(), self._dvl_cfg,
+                        SonarConfig(), AltimeterConfig()
+                    )
                     await websocket.send(self._terrain_map_msg)
                 elif cmd == 'param':
                     key = data.get('key')
@@ -1310,8 +1278,6 @@ def main() -> None:
                         help='WebSocket port (default: 8083)')
     parser.add_argument('--swap-xy', action='store_true',
                         help='Swap nav.x/nav.y if vehicle uses east-first convention')
-    parser.add_argument('--cpp', action='store_true', dest='use_cpp',
-                        help='Use the C++ occupancy map backend (falls back to Python if unavailable)')
     parser.add_argument('--lcm-types-path', default=_DEFAULT_LCM_TYPES_PATH,
                         metavar='PATH',
                         help='Path to directory containing perls/lcmtypes package')
@@ -1372,7 +1338,6 @@ def main() -> None:
         ws_port=args.ws_port,
         initial_speed=args.speed,
         swap_xy=args.swap_xy,
-        use_cpp_backend=args.use_cpp,
         lcm_types_path=args.lcm_types_path,
         sonar_max_range=args.sonar_max_range,
         altimeter_max_range=args.altimeter_max_range,

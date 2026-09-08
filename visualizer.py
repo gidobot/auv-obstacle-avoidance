@@ -25,7 +25,7 @@ except ImportError:
     subprocess.check_call(['pip', 'install', 'websockets', '--break-system-packages'])
     import websockets
 
-from occupancy_map import OccupancyMap, OccupancyMapConfig
+from occupancy_map_cpp import OccupancyMap, OccupancyMapConfig
 from simulator import (
     Simulator3D, Trajectory3D, StraightTrajectory3D, ArcTrajectory3D,
     WaypointTrajectory3D, SegmentedTrajectory3D,
@@ -244,7 +244,6 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
   </div>
   <div class="cfg-sec">
     <h3>Simulation</h3>
-    <div class="cfg-row"><label>Backend</label><select id="cfgBackend"><option value="python">Python</option><option value="cpp">C++</option></select></div>
     <div class="cfg-row"><label>Time accel</label><input type="number" id="cfgTimeAccel" value="1" min="1" max="20" step="1"></div>
     <div class="cfg-row cfg-check"><label>DVL</label><input type="checkbox" id="cfgEnableDvl" checked onchange="sendSensorToggle('enable_dvl', this.checked)"></div>
     <div class="cfg-row cfg-check"><label>Altimeter</label><input type="checkbox" id="cfgEnableAlt" checked onchange="sendSensorToggle('enable_altimeter', this.checked)"></div>
@@ -837,7 +836,6 @@ function applyConfig() {
     obstacle_threshold:        +document.getElementById('cfgObstThresh').value,
     stale_heading_threshold_deg: +document.getElementById('cfgStaleHeading').value,
     time_accel:                +document.getElementById('cfgTimeAccel').value,
-    backend:                    document.getElementById('cfgBackend').value,
     enable_dvl:                 document.getElementById('cfgEnableDvl').checked,
     enable_altimeter:           document.getElementById('cfgEnableAlt').checked,
     enable_sonar:               document.getElementById('cfgEnableSonar').checked,
@@ -879,9 +877,7 @@ class VisualizerServer3D:
         trajectory:     Trajectory3D | None = None,
         initial_heading_deg: float = 0.0,
         mission_path: list | None = None,
-        use_cpp_backend: bool = False,
     ):
-        self.use_cpp_backend     = use_cpp_backend
         self.enable_dvl          = True
         self.enable_altimeter    = True
         self.enable_sonar        = True
@@ -973,7 +969,6 @@ class VisualizerServer3D:
             trajectory=self.trajectory,
             initial_heading_deg=self.initial_heading_deg,
             initial_depth=init_depth,
-            use_cpp_backend=self.use_cpp_backend,
             enable_dvl=self.enable_dvl,
             enable_altimeter=self.enable_altimeter,
             enable_sonar=self.enable_sonar,
@@ -1177,8 +1172,6 @@ class VisualizerServer3D:
         self._map_nx, self._map_ny, self._map_dx, self._map_dy, \
             self._map_ox, self._map_oy = self._compute_map_extents(mission_path)
 
-        if 'backend' in data:
-            self.use_cpp_backend = (data['backend'] == 'cpp')
         for key in ('enable_dvl', 'enable_altimeter', 'enable_sonar'):
             if key in data:
                 setattr(self, key, bool(data[key]))

@@ -120,17 +120,34 @@ omap = OccupancyMap(config)
 
 ### Link against `auv_oavoid` from another CMake project
 
-```cmake
-find_package(auv_obstacle_avoidance REQUIRED)
-target_link_libraries(my_target PRIVATE auv_oavoid)
-```
-
-Or add the `cpp/` directory as a subdirectory:
+`auv_oavoid` is the LCM-free, Python-free core.  Add the `cpp/` directory as a
+subdirectory and link the target:
 
 ```cmake
 add_subdirectory(path/to/auv-obstacle-avoidance/cpp)
 target_link_libraries(my_target PRIVATE auv_oavoid)
 ```
+
+The Python extension is skipped automatically when this project is consumed
+this way — pybind11 and a matching Python are not needed by a consumer, only
+Eigen.  (Force it either way with `-DAUV_OAVOID_BUILD_PYTHON=ON/OFF`.)
+
+There is no installed CMake package to `find_package`, by design: the core is
+two files, and consumers pin a version by vendoring this repo as a git
+submodule rather than by installing it.
+
+#### Consumers
+
+`acfr-lcm`'s `oa-mapper` node consumes this repo as a submodule at
+`src/acfr/oa-mapper/auv-obstacle-avoidance`, pinned to a specific commit.  The
+node builds `oa_mapper.cpp` against `auv_oavoid` from that submodule, so the
+algorithm running on the vehicle is exactly the revision recorded by the
+submodule pointer.
+
+Changes needed by the vehicle must land **here** and the submodule pointer be
+bumped there — never edited in the consuming repo.  That is what keeps the C++
+core, the Python reference implementation in `occupancy_map.py`, and the
+`test_cpp.py` parity check in agreement.
 
 ---
 

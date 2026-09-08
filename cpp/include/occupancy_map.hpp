@@ -24,7 +24,7 @@ struct DVLConfig {
         {20.0, 120.0},
         {20.0, 240.0},
     };
-    double max_range = 25.0;
+    double max_range = 50.0;
 
     /// 2-D projected angle from vertical for each beam (rad).
     /// atan2(sin(slant)*cos(heading_offset), cos(slant))
@@ -42,7 +42,7 @@ struct DVLConfig {
 };
 
 struct SonarConfig {
-    double max_range  = 20.0;
+    double max_range  = 12.0;
     double half_angle = 3.0;   // half beam width (degrees)
     double noise_std  = 0.3;   // range measurement noise std (m)
 
@@ -50,7 +50,7 @@ struct SonarConfig {
 };
 
 struct AltimeterConfig {
-    double max_range = 25.0;
+    double max_range = 100.0;
 };
 
 struct Pose {
@@ -252,6 +252,9 @@ private:
     double cliff_top_target_z_;
     double cliff_top_target_x_;
     double cliff_top_release_x_;
+    double cliff_top_commit_heading_;  // heading when the latch anchored to its peak
+
+    double last_vehicle_heading_;      // set by update()
 
     // ---- Internal helpers ----
     bool in_bounds(int ix, int iz) const {

@@ -481,12 +481,32 @@ def _build_client_html(ws_port: int) -> str:
             "      if (z == null) { r = g = b = 35; }\n"
             "      else { [r, g, b] = depthToRgb(z, minZ, maxZ); }"
         )
-        # Add 3D map button after Reset
+        # Remove Export Terrain button/size input; add 3D Map button
         .replace(
-            r"""<button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>""",
-            r"""<button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>"""
-            "\n    "
-            r"""<button onclick="window.open('/3d','_blank')" title="Open interactive 3D terrain map">3D Map ↗</button>"""
+            "<button onclick=\"ws.send(JSON.stringify({cmd:'reset'}))\">Reset</button>\n"
+            "    <button onclick=\"exportTerrain()\" title=\"Export current terrain as OBJ mesh"
+            " + height-coloured textured material + PNG heightmap for Blender/Gazebo\">Export Terrain</button>\n"
+            "    <label title=\"Side length of exported terrain (m), centred on origin\">Export size\n"
+            "      <input type=\"number\" id=\"exportSize\" value=\"500\" min=\"50\" max=\"2000\""
+            " step=\"50\" style=\"width:64px\">m\n"
+            "    </label>",
+            "<button onclick=\"ws.send(JSON.stringify({cmd:'reset'}))\">Reset</button>\n"
+            "    <button onclick=\"window.open('/3d','_blank')\" title=\"Open interactive 3D terrain map\">3D Map ↗</button>",
+        )
+        # Hide configure gear button and panel (no terrain/trajectory to reconfigure in LCM mode)
+        .replace(
+            '<button id="cfgBtn" onclick="toggleCfg()" title="Configure simulation">&#9881;</button>',
+            '',
+        )
+        .replace('<div id="cfgPanel">', '<div id="cfgPanel" style="display:none">')
+        # Update page title and heading for LCM context
+        .replace(
+            '<title>AUV Obstacle Avoidance – 3D Simulator</title>',
+            '<title>AUV Obstacle Avoidance – LCM Playback</title>',
+        )
+        .replace(
+            'AUV Obstacle Avoidance Simulator – 3D Mode',
+            'AUV Obstacle Avoidance – LCM Playback',
         )
     )
 

@@ -1,1 +1,10 @@
+# Build artifacts
 cpp/build/
+cpp/build_*/
+*.so
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/

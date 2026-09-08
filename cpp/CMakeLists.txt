@@ -4,6 +4,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+
+# Resolve the Python interpreter before pybind11 so the extension is built for
+# the interpreter that will import it.  Without this, CMake may pick a
+# different Python than the active venv and silently install a module with a
+# non-importable ABI suffix, leaving a stale .so in place.  build.sh passes
+# Python_EXECUTABLE explicitly; this find_package honours it.
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
+message(STATUS "Building extension for ${Python_EXECUTABLE} (${Python_VERSION})")
 find_package(pybind11 CONFIG REQUIRED)
 
 add_library(auv_oavoid STATIC src/occupancy_map.cpp)

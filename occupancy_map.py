@@ -39,7 +39,7 @@ Individual modes:
   Mode: OBSTACLE_HOLD  (latch active, vehicle at or above target depth)
     Vehicle flies forward at survey_speed holding the latch target depth
     (DEPTH_HOLD).  Active until the vehicle passes release_x (target_x +
-    cliff_standoff + vehicle_length + 1 m).  The latch can only be updated
+    cliff_standoff + vehicle_length m).  The latch can only be updated
     to a shallower target — never overridden or released early.
 
   Mode: ALT_CORRECTION  (altitude diverges above imaging altitude target)
@@ -408,12 +408,15 @@ class OccupancyMap:
         # Cliff-top crossing latch.  Set when the vehicle crosses over the
         # highest detected voxel within cliff_standoff ahead during a climb,
         # cleared after the vehicle has flown
-        # (cliff_standoff + vehicle_length + 1 m) past the peak at constant
-        # depth (tail-clearance distance).
+        # (cliff_standoff + vehicle_length) past the peak at constant
+        # depth (tail-clearance distance), or when the vehicle turns away.
         self._cliff_top_committed: bool = False
         self._cliff_top_target_z: float = np.nan  # ratchets shallower only
         self._cliff_top_target_x: float = np.nan  # ratchets forward only
         self._cliff_top_release_x: float = np.nan
+        self._cliff_top_commit_heading: float = np.nan  # heading at commit
+
+        self._last_vehicle_heading: float = np.nan  # set by update()
 
 
     def reset(self, vehicle_world_x: float = 0.0, vehicle_depth: float = 0.0):
@@ -437,6 +440,8 @@ class OccupancyMap:
         self._cliff_top_target_z = np.nan
         self._cliff_top_target_x = np.nan
         self._cliff_top_release_x = np.nan
+        self._cliff_top_commit_heading = np.nan
+        self._last_vehicle_heading = np.nan
 
     # -------------------------------------------------------------------------
     # Coordinate transforms
@@ -656,12 +661,10 @@ class OccupancyMap:
             ix, iz = self.world_to_grid(vehicle_world_x + dx,
                                         vehicle_depth + dz)
             if self._in_bounds(ix, iz):
-                was_occupied = self.grid[iz, ix] > c.occ_thresh
                 if is_hit:
                     self.grid[iz, ix] = min(c.dvl_max_occ,
                                             self.grid[iz, ix] + c.dvl_hit_prob)
-                    if not was_occupied:
-                        self.voxel_heading[iz, ix] = vehicle_heading
+                    self.voxel_heading[iz, ix] = vehicle_heading
                 elif allow_clear:
                     self.grid[iz, ix] = max(c.dvl_min_occ,
                                             self.grid[iz, ix] - c.dvl_miss_prob)
@@ -716,12 +719,10 @@ class OccupancyMap:
 
         ix, iz = self.world_to_grid(vehicle_world_x, vehicle_depth + range_m)
         if self._in_bounds(ix, iz):
-            was_occupied = self.grid[iz, ix] > c.occ_thresh
             if hit:
                 self.grid[iz, ix] = min(c.altimeter_max_occ,
                                         self.grid[iz, ix] + c.altimeter_hit_prob)
-                if not was_occupied:
-                    self.voxel_heading[iz, ix] = vehicle_heading
+                self.voxel_heading[iz, ix] = vehicle_heading
             else:
                 self.grid[iz, ix] = max(c.altimeter_min_occ,
                                         self.grid[iz, ix] - c.altimeter_miss_prob)
@@ -777,12 +778,10 @@ class OccupancyMap:
             ix, iz = self.world_to_grid(vehicle_world_x + dx,
                                         vehicle_depth + dz)
             if self._in_bounds(ix, iz):
-                was_occupied = self.grid[iz, ix] > c.occ_thresh
                 if hit_obstacle:
                     self.grid[iz, ix] = min(c.sonar_max_occ,
                                             self.grid[iz, ix] + c.sonar_hit_prob)
-                    if not was_occupied:
-                        self.voxel_heading[iz, ix] = vehicle_heading
+                    self.voxel_heading[iz, ix] = vehicle_heading
                 else:
                     self.grid[iz, ix] = max(c.sonar_min_occ,
                                             self.grid[iz, ix] - c.sonar_miss_prob)
@@ -970,7 +969,7 @@ class OccupancyMap:
             Commit: when the vehicle has crossed over the highest detected
             voxel within ``cliff_standoff``, latch on.  Hold target depth
             (= peak_z - imaging) and fly forward
-            ``cliff_standoff + vehicle_length + 1`` m at constant depth so
+            ``cliff_standoff + vehicle_length`` m at constant depth so
             the tail clears the cliff edge.  During the forward-hold, if any
             DVL beam reads altitude < ``imaging_altitude``, ratchet target
             shallower to maintain that minimum (vehicle never descends in
@@ -1028,6 +1027,7 @@ class OccupancyMap:
             self._cliff_top_target_z = np.nan
             self._cliff_top_target_x = np.nan
             self._cliff_top_release_x = np.nan
+            self._cliff_top_commit_heading = np.nan
 
         # ----- Step 2b: forward-obstacle detection — engage/update latch -----
         # Any manifold voxel within cliff_standoff ahead of the NOSE with
@@ -1039,7 +1039,7 @@ class OccupancyMap:
         # For a discrete cliff: detection fires while approaching, target
         # stays at the cliff peak.  Vehicle ascends to peak - imaging, then
         # forward at that depth until past peak + cliff_standoff +
-        # vehicle_length + 1, then release.
+        # vehicle_length, then release.
         #
         # For a continuous upslope: each cycle a new shallower far-edge
         # voxel enters the window, target_z ratchets shallower.  Vehicle
@@ -1062,22 +1062,25 @@ class OccupancyMap:
                 self._cliff_top_committed = True
                 self._cliff_top_target_z = new_target_z
                 self._cliff_top_target_x = peak_x
+                self._cliff_top_commit_heading = self._last_vehicle_heading
             else:
                 if new_target_z < self._cliff_top_target_z:
                     self._cliff_top_target_z = new_target_z
                 if peak_x > self._cliff_top_target_x:
                     self._cliff_top_target_x = peak_x
+                    # Re-anchor the commit heading: the latch now tracks a peak
+                    # observed at the current heading, so the turn-away release
+                    # must be measured from here, not from the original commit.
+                    self._cliff_top_commit_heading = self._last_vehicle_heading
             self._cliff_top_release_x = (
                 self._cliff_top_target_x
-                + c.cliff_standoff + c.vehicle_length + 1.0
+                + c.cliff_standoff + c.vehicle_length
             )
         elif self._cliff_top_committed:
             # Latch is committed but the narrow window (safety_below_m) found
             # nothing.  Run a wider scan using imaging_altitude as the depth
             # threshold to catch terrain between safety_below_m and
-            # imaging_altitude below the vehicle.  Only update target_z (not
-            # target_x or release_x) — extending the release point based on
-            # background flat terrain would delay latch release indefinitely.
+            # imaging_altitude below the vehicle.
             wide_z, wide_x = self._forward_obstacle(
                 vehicle_depth, vehicle_world_x,
                 z_threshold=vehicle_depth + c.imaging_altitude,
@@ -1086,21 +1089,48 @@ class OccupancyMap:
                 new_target_z = wide_z - c.imaging_altitude
                 if new_target_z < self._cliff_top_target_z:
                     self._cliff_top_target_z = new_target_z
-                    self._cliff_top_target_x = max(
-                        self._cliff_top_target_x, wide_x
-                    )
+                    if wide_x > self._cliff_top_target_x:
+                        self._cliff_top_target_x = wide_x
+                        self._cliff_top_commit_heading = (
+                            self._last_vehicle_heading
+                        )
                     self._cliff_top_release_x = (
                         self._cliff_top_target_x
-                        + c.cliff_standoff + c.vehicle_length + 1.0
+                        + c.cliff_standoff + c.vehicle_length
                     )
+                # else: terrain at or below imaging_altitude — keep latch so
+                # the tail clears the highest obstacle voxel before the
+                # altimeter takes over.
+            else:
+                # Both narrow and wide scans empty: no forward obstacle visible.
+                # Only release if the vehicle has turned significantly from the
+                # heading at latch commit (same threshold as clear_stale_voxels),
+                # which is what causes the occupied voxels to disappear.  Without
+                # this guard the cliff peak passing behind vehicle_center during
+                # normal OBSTACLE_HOLD forward flight would trigger a premature
+                # release before the tail has cleared.
+                h_cur = self._last_vehicle_heading
+                h_cmt = self._cliff_top_commit_heading
+                if not (np.isnan(h_cur) or np.isnan(h_cmt)):
+                    # Same wrap handling as clear_stale_voxels: the modulo
+                    # first keeps this correct for unwrapped headings, where
+                    # a bare (2*pi - diff) would go negative.
+                    diff = abs(h_cur - h_cmt) % (2.0 * np.pi)
+                    diff = min(diff, 2.0 * np.pi - diff)
+                    if diff > np.radians(c.stale_heading_threshold_deg):
+                        self._cliff_top_committed = False
+                        self._cliff_top_target_z = np.nan
+                        self._cliff_top_target_x = np.nan
+                        self._cliff_top_release_x = np.nan
+                        self._cliff_top_commit_heading = np.nan
 
         # ----- Step 2c: apply latch (effective cmd_depth) -----
-        # The latch is inviolable: once committed it overrides ALL other planning
-        # until Step 2a releases it at release_x.  No early release on peak_z=None
-        # — the obstacle may have just exited the detection window while the vehicle
-        # is still well short of release_x.  Always use the committed target depth
-        # exactly (not min with vehicle_depth) so OBSTACLE_HOLD can hold constant
-        # depth while the vehicle flies forward over the obstacle.
+        # Two release paths: Step 2a (x-based: tail has cleared peak + standoff)
+        # and Step 2b early-release (both scans empty: vehicle turned away).
+        # A narrow-scan miss alone does NOT release — the obstacle may have just
+        # exited the narrow window while the vehicle is still approaching the peak.
+        # Always use the committed target depth exactly so OBSTACLE_HOLD holds
+        # constant depth while the vehicle flies forward over the obstacle.
         if self._cliff_top_committed:
             effective = self._cliff_top_target_z
             for ix in range(self.cx, self.nx):
@@ -1294,6 +1324,7 @@ class OccupancyMap:
         Returns:
             Commanded depth at the vehicle position.
         """
+        self._last_vehicle_heading = vehicle_heading
         self.clear_stale_voxels(vehicle_heading)
         self.build_cliff_manifold()
         self.build_commanded_depth(vehicle_depth)

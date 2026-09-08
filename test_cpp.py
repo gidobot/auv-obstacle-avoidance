@@ -34,10 +34,30 @@ def test_construction():
     assert abs(c.imaging_altitude - 2.0) < 1e-9
     assert abs(c.prior - 0.5) < 1e-9
 
+    # DVL geometry must match the Python config exactly — a stale or
+    # mismatched build of the extension shows up here first.
     dvl = cpp.DVLConfig()
+    py_dvl = DVLConfig()
+    assert list(dvl.beams) == [tuple(b) for b in py_dvl.beams], \
+        f"beam config mismatch: cpp={list(dvl.beams)} py={py_dvl.beams}"
     angles = dvl.beam_angles_rad
-    assert len(angles) == 4
-    assert abs(angles[0]) < 1e-9           # altimeter is straight down
+    assert len(angles) == 3                # 3 Janus beams; altimeter is separate
+    assert np.allclose(angles, py_dvl.beam_angles_rad), \
+        f"beam angle mismatch: cpp={list(angles)} py={list(py_dvl.beam_angles_rad)}"
+    assert list(dvl.beam_can_clear) == list(py_dvl.beam_can_clear), \
+        f"beam_can_clear mismatch: cpp={list(dvl.beam_can_clear)} py={list(py_dvl.beam_can_clear)}"
+    assert np.allclose(dvl.beam_directions_3d, py_dvl.beam_directions_3d), \
+        "beam_directions_3d mismatch"
+    assert abs(dvl.max_range - py_dvl.max_range) < 1e-9, \
+        f"dvl max_range mismatch: cpp={dvl.max_range} py={py_dvl.max_range}"
+
+    py_sonar, py_alt = SonarConfig(), AltimeterConfig()
+    cpp_sonar, cpp_alt = cpp.SonarConfig(), cpp.AltimeterConfig()
+    assert abs(cpp_sonar.max_range - py_sonar.max_range) < 1e-9, \
+        f"sonar max_range mismatch: cpp={cpp_sonar.max_range} py={py_sonar.max_range}"
+    assert abs(cpp_sonar.half_angle - py_sonar.half_angle) < 1e-9
+    assert abs(cpp_alt.max_range - py_alt.max_range) < 1e-9, \
+        f"altimeter max_range mismatch: cpp={cpp_alt.max_range} py={py_alt.max_range}"
 
     mapper = cpp.ObstacleMapper(c, dvl, cpp.SonarConfig())
     ctrl = mapper.get_control()

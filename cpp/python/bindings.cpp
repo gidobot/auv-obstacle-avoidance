@@ -11,11 +11,21 @@ using namespace auv_oavoid;
 // ---------------------------------------------------------------------------
 // Helper: convert std::vector<bool> to numpy bool array
 // ---------------------------------------------------------------------------
+// NOTE: the shape must be passed as a container.  `py::array_t<T> arr(n)` with a
+// bare integer does not build a shape-{n} array — it yields ndim=1, size=n but
+// stride 0, so every element aliases the same storage and the array reads back
+// as the last value written.  Always use a vector/braced shape.
 static py::array_t<bool> vec_bool_to_numpy(const std::vector<bool>& v) {
-    py::array_t<bool> arr(static_cast<py::ssize_t>(v.size()));
+    py::array_t<bool> arr(std::vector<py::ssize_t>{static_cast<py::ssize_t>(v.size())});
     auto buf = arr.mutable_unchecked<1>();
-    for (size_t i = 0; i < v.size(); ++i) buf[i] = v[i];
+    for (size_t i = 0; i < v.size(); ++i) buf[static_cast<py::ssize_t>(i)] = v[i];
     return arr;
+}
+
+// Same fix for a contiguous double vector — copies from v.data().
+static py::array_t<double> vec_double_to_numpy(const std::vector<double>& v) {
+    return py::array_t<double>(
+        std::vector<py::ssize_t>{static_cast<py::ssize_t>(v.size())}, v.data());
 }
 
 // ---------------------------------------------------------------------------
@@ -96,12 +106,7 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
         .def_readwrite("max_range", &DVLConfig::max_range)
         .def_property_readonly("beam_angles_rad",
             [](const DVLConfig& self) {
-                auto v = self.beam_angles_rad();
-                py::array_t<double> arr(static_cast<py::ssize_t>(v.size()));
-                auto buf = arr.mutable_unchecked<1>();
-                for (py::ssize_t i = 0; i < static_cast<py::ssize_t>(v.size()); ++i)
-                    buf[i] = v[static_cast<size_t>(i)];
-                return arr;
+                return vec_double_to_numpy(self.beam_angles_rad());
             })
         .def_property_readonly("beam_directions_3d",
             [](const DVLConfig& self) -> Eigen::MatrixXd {

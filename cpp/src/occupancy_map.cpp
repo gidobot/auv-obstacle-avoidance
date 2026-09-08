@@ -86,6 +86,8 @@ OccupancyMap::OccupancyMap(const OccupancyMapConfig& cfg)
     cliff_top_target_z_  = kNaN;
     cliff_top_target_x_  = kNaN;
     cliff_top_release_x_ = kNaN;
+    cliff_top_commit_heading_ = kNaN;
+    last_vehicle_heading_     = kNaN;
 }
 
 void OccupancyMap::reset(double vehicle_world_x, double vehicle_depth) {
@@ -112,6 +114,8 @@ void OccupancyMap::reset(double vehicle_world_x, double vehicle_depth) {
     cliff_top_target_z_  = kNaN;
     cliff_top_target_x_  = kNaN;
     cliff_top_release_x_ = kNaN;
+    cliff_top_commit_heading_ = kNaN;
+    last_vehicle_heading_     = kNaN;
 }
 
 // ===========================================================================
@@ -256,12 +260,9 @@ void OccupancyMap::update_dvl_ray(
         auto [ix, iz] = world_to_grid(vehicle_world_x + dx, vehicle_depth + dz);
         if (!in_bounds(ix, iz)) continue;
 
-        bool was_occupied = grid_(iz, ix) > c.occ_thresh;
         if (is_hit) {
             grid_(iz, ix) = std::min(c.dvl_max_occ, grid_(iz, ix) + c.dvl_hit_prob);
-            if (!was_occupied) {
-                voxel_heading_(iz, ix) = vehicle_heading;
-            }
+            voxel_heading_(iz, ix) = vehicle_heading;
         } else if (allow_clear) {
             grid_(iz, ix) = std::max(c.dvl_min_occ, grid_(iz, ix) - c.dvl_miss_prob);
             voxel_heading_(iz, ix) = vehicle_heading;
@@ -305,12 +306,9 @@ void OccupancyMap::update_altimeter_ray(
     auto [ix, iz] = world_to_grid(vehicle_world_x, vehicle_depth + range_m);
     if (!in_bounds(ix, iz)) return;
 
-    bool was_occupied = grid_(iz, ix) > c.occ_thresh;
     if (hit) {
         grid_(iz, ix) = std::min(c.altimeter_max_occ, grid_(iz, ix) + c.altimeter_hit_prob);
-        if (!was_occupied) {
-            voxel_heading_(iz, ix) = vehicle_heading;
-        }
+        voxel_heading_(iz, ix) = vehicle_heading;
     } else {
         grid_(iz, ix) = std::max(c.altimeter_min_occ, grid_(iz, ix) - c.altimeter_miss_prob);
         voxel_heading_(iz, ix) = vehicle_heading;
@@ -360,12 +358,9 @@ void OccupancyMap::update_sonar(
         auto [ix, iz] = world_to_grid(vehicle_world_x + dx, vehicle_depth + dz);
         if (!in_bounds(ix, iz)) continue;
 
-        bool was_occupied = grid_(iz, ix) > c.occ_thresh;
         if (hit_obstacle) {
             grid_(iz, ix) = std::min(c.sonar_max_occ, grid_(iz, ix) + c.sonar_hit_prob);
-            if (!was_occupied) {
-                voxel_heading_(iz, ix) = vehicle_heading;
-            }
+            voxel_heading_(iz, ix) = vehicle_heading;
         } else {
             grid_(iz, ix) = std::max(c.sonar_min_occ, grid_(iz, ix) - c.sonar_miss_prob);
             voxel_heading_(iz, ix) = vehicle_heading;
@@ -569,6 +564,7 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
         cliff_top_target_z_  = kNaN;
         cliff_top_target_x_  = kNaN;
         cliff_top_release_x_ = kNaN;
+        cliff_top_commit_heading_ = kNaN;
     }
 
     // ----- Step 2b: forward-obstacle detection -----
@@ -579,11 +575,18 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
             cliff_top_committed_ = true;
             cliff_top_target_z_  = new_target_z;
             cliff_top_target_x_  = obs.peak_world_x;
+            cliff_top_commit_heading_ = last_vehicle_heading_;
         } else {
             if (new_target_z < cliff_top_target_z_) cliff_top_target_z_ = new_target_z;
-            if (obs.peak_world_x > cliff_top_target_x_) cliff_top_target_x_ = obs.peak_world_x;
+            if (obs.peak_world_x > cliff_top_target_x_) {
+                cliff_top_target_x_ = obs.peak_world_x;
+                // Re-anchor the commit heading: the latch now tracks a peak
+                // observed at the current heading, so the turn-away release
+                // must be measured from here, not from the original commit.
+                cliff_top_commit_heading_ = last_vehicle_heading_;
+            }
         }
-        cliff_top_release_x_ = cliff_top_target_x_ + c.cliff_standoff + c.vehicle_length + 1.0;
+        cliff_top_release_x_ = cliff_top_target_x_ + c.cliff_standoff + c.vehicle_length;
     } else if (cliff_top_committed_) {
         // Wide scan using imaging_altitude as depth threshold
         auto wide = forward_obstacle(vehicle_depth, vehicle_world_x,
@@ -592,8 +595,38 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
             double new_target_z = wide.peak_z - c.imaging_altitude;
             if (new_target_z < cliff_top_target_z_) {
                 cliff_top_target_z_ = new_target_z;
-                cliff_top_target_x_ = std::max(cliff_top_target_x_, wide.peak_world_x);
-                cliff_top_release_x_ = cliff_top_target_x_ + c.cliff_standoff + c.vehicle_length + 1.0;
+                if (wide.peak_world_x > cliff_top_target_x_) {
+                    cliff_top_target_x_ = wide.peak_world_x;
+                    cliff_top_commit_heading_ = last_vehicle_heading_;
+                }
+                cliff_top_release_x_ = cliff_top_target_x_ + c.cliff_standoff + c.vehicle_length;
+            }
+            // else: terrain at or below imaging_altitude — keep latch so the
+            // tail clears the highest obstacle voxel before the altimeter
+            // takes over.
+        } else {
+            // Both narrow and wide scans empty: no forward obstacle visible.
+            // Only release if the vehicle has turned significantly from the
+            // heading the latch anchored at (same threshold as
+            // clear_stale_voxels), which is what causes the occupied voxels to
+            // disappear.  Without this guard the cliff peak passing behind
+            // vehicle_center during normal OBSTACLE_HOLD forward flight would
+            // trigger a premature release before the tail has cleared.
+            double h_cur = last_vehicle_heading_;
+            double h_cmt = cliff_top_commit_heading_;
+            if (!std::isnan(h_cur) && !std::isnan(h_cmt)) {
+                // Same wrap handling as clear_stale_voxels: the fmod first
+                // keeps this correct for unwrapped headings, where a bare
+                // (2*pi - diff) would go negative.
+                double diff = std::fmod(std::abs(h_cur - h_cmt), 2.0 * M_PI);
+                diff = std::min(diff, 2.0 * M_PI - diff);
+                if (diff > c.stale_heading_threshold_deg * M_PI / 180.0) {
+                    cliff_top_committed_ = false;
+                    cliff_top_target_z_  = kNaN;
+                    cliff_top_target_x_  = kNaN;
+                    cliff_top_release_x_ = kNaN;
+                    cliff_top_commit_heading_ = kNaN;
+                }
             }
         }
     }
@@ -717,6 +750,7 @@ void OccupancyMap::clear_stale_voxels(double vehicle_heading) {
 // ===========================================================================
 
 double OccupancyMap::update(double vehicle_depth, double vehicle_heading) {
+    last_vehicle_heading_ = vehicle_heading;
     clear_stale_voxels(vehicle_heading);
     build_cliff_manifold();
     build_commanded_depth(vehicle_depth);

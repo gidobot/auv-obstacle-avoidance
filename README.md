@@ -164,7 +164,7 @@ implementation of the algorithm; `test_occupancy_map.py` is what guards it.
 | `test_occupancy_map.py` | Behavioural tests for the core. |
 | `task_priority_baseline.py` | Set-based task-priority controller — a research baseline for the publication comparison. Simulation only; never deployed. |
 | `compare_controllers.py` | Runs the deployed controller and the baselines over the same missions and reports clearance / altitude / transition metrics. |
-| `docs/commitment-under-occlusion.html` | Positioning and section outline for a publication on the method. Open it in a browser. |
+| `docs/sequencing-over-arbitration.html` | Positioning and section outline for a publication on the method, with the controller comparison results. Open it in a browser. |
 
 > A Python implementation of the algorithm (`occupancy_map.py`) was maintained
 > alongside the C++ as the original prototype.  It was removed once the C++ was

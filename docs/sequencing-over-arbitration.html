@@ -274,6 +274,19 @@
   .cell-note { font-family: var(--f-mono); font-size: 0.68rem; color: var(--muted);
                font-weight: 400; }
 
+  /* transition-graph text */
+  .dg-region    { font-family: "IBM Plex Mono", monospace; font-size: 10px; fill: var(--muted);
+                  letter-spacing: 0.08em; text-transform: uppercase; }
+  .dg-region-em { font-family: "IBM Plex Mono", monospace; font-size: 10px; fill: var(--accent);
+                  letter-spacing: 0.08em; text-transform: uppercase; }
+  .dg-node      { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; fill: var(--ink);
+                  font-weight: 500; }
+  .dg-sub       { font-family: "IBM Plex Sans", sans-serif; font-size: 10px; fill: var(--muted); }
+  .dg-edge      { font-family: "IBM Plex Sans", sans-serif; font-size: 11px; fill: var(--muted); }
+  .dg-edge-latch{ font-family: "IBM Plex Sans", sans-serif; font-size: 11px; fill: var(--d4); }
+  .dg-edge-gone { font-family: "IBM Plex Sans", sans-serif; font-size: 11px; fill: var(--accent); }
+  .dg-legend    { font-family: "IBM Plex Sans", sans-serif; font-size: 10.5px; fill: var(--muted); }
+
   a { color: var(--accent); text-underline-offset: 2px; }
   a:focus-visible, :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
@@ -545,6 +558,92 @@
       <div class="claim">
         <p>That closes the argument without any assumption about how fast the command may move. The two zero-progress modes cannot alternate, because the transition between them is gone. <code>ALT_CORRECTION</code> cannot persist against a bounded command and a monotone descent. <code>OBSTACLE_CLEAR</code> persists only toward the surface. So the sole unbounded zero-progress state is the vehicle held at the surface by a target it cannot reach — which is the property as originally stated, now proved rather than assumed.</p>
       </div>
+    </div>
+
+    <figure>
+      <div class="fig-frame">
+        <svg viewBox="0 0 960 470" role="img" aria-label="Mode transition graph. The two zero-forward-velocity states, ALT_CORRECTION and OBSTACLE_CLEAR, are joined by a single edge from ALT_CORRECTION to OBSTACLE_CLEAR. The return edge is removed by the ascent guard, so no cycle exists among them and every path between them leaves through a forward-progress state.">
+          <defs>
+            <marker id="ah" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L9,4.5 L0,9 z" fill="var(--ink)"/>
+            </marker>
+            <marker id="ah-latch" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L9,4.5 L0,9 z" fill="var(--d4)"/>
+            </marker>
+            <marker id="ah-gone" viewBox="0 0 9 9" refX="8" refY="4.5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L9,4.5 L0,9 z" fill="var(--accent)"/>
+            </marker>
+          </defs>
+
+          <!-- forward-progress region -->
+          <rect x="110" y="40" width="640" height="96" rx="8" fill="var(--surface-2)" stroke="var(--rule-firm)"/>
+          <text class="dg-region" x="128" y="64">forward progress · vx = survey_speed</text>
+          <text class="dg-node" x="230" y="106" text-anchor="middle">ALT_FOLLOW</text>
+          <text class="dg-node" x="430" y="106" text-anchor="middle">OBSTACLE_HOLD</text>
+          <text class="dg-node" x="630" y="106" text-anchor="middle">TAIL_CLEAR</text>
+
+          <!-- zero-progress region -->
+          <rect x="110" y="268" width="640" height="130" rx="8" fill="none"
+                stroke="var(--accent)" stroke-dasharray="5 4" opacity="0.55"/>
+          <text class="dg-region-em" x="128" y="390">zero progress · vx = 0</text>
+
+          <rect x="150" y="298" width="180" height="52" rx="6" fill="var(--surface)" stroke="var(--ink)"/>
+          <text class="dg-node" x="240" y="320" text-anchor="middle">ALT_CORRECTION</text>
+          <text class="dg-sub"  x="240" y="337" text-anchor="middle">descends · target bounded</text>
+
+          <rect x="530" y="298" width="180" height="52" rx="6" fill="var(--surface)" stroke="var(--ink)"/>
+          <text class="dg-node" x="620" y="320" text-anchor="middle">OBSTACLE_CLEAR</text>
+          <text class="dg-sub"  x="620" y="337" text-anchor="middle">ascends · target monotone</text>
+
+          <!-- entries -->
+          <line x1="190" y1="136" x2="190" y2="292" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah)"/>
+          <text class="dg-edge" x="198" y="196">cmd ≥ v + T</text>
+          <line x1="690" y1="136" x2="690" y2="292" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah)"/>
+          <text class="dg-edge" x="700" y="196">cmd ≤ v − T</text>
+
+          <!-- exits, both upward -->
+          <line x1="290" y1="292" x2="290" y2="142" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah)"/>
+          <text class="dg-edge" x="298" y="250">reached</text>
+          <line x1="560" y1="292" x2="560" y2="142" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah)"/>
+          <text class="dg-edge" x="552" y="250" text-anchor="end">reached</text>
+          <line x1="600" y1="292" x2="600" y2="142" stroke="var(--d4)" stroke-width="2" marker-end="url(#ah-latch)"/>
+          <text class="dg-edge-latch" x="608" y="175">latch holds</text>
+
+          <!-- the one edge between them -->
+          <line x1="330" y1="318" x2="524" y2="318" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah)"/>
+          <text class="dg-edge" x="427" y="308" text-anchor="middle">target rises above vehicle</text>
+
+          <!-- the edge that is not there -->
+          <line x1="530" y1="366" x2="336" y2="366" stroke="var(--accent)" stroke-width="1.6"
+                stroke-dasharray="6 5" opacity="0.5" marker-end="url(#ah-gone)"/>
+          <line x1="418" y1="357" x2="436" y2="375" stroke="var(--accent)" stroke-width="2.2"/>
+          <line x1="436" y1="357" x2="418" y2="375" stroke="var(--accent)" stroke-width="2.2"/>
+          <text class="dg-edge-gone" x="427" y="390" text-anchor="middle">removed by the ascent guard</text>
+
+          <!-- terminal -->
+          <line x1="710" y1="324" x2="784" y2="324" stroke="var(--ink)" stroke-width="1.6"
+                stroke-dasharray="4 4" marker-end="url(#ah)"/>
+          <text class="dg-edge" x="747" y="314" text-anchor="middle">unreachable</text>
+          <rect x="790" y="298" width="150" height="52" rx="6" fill="none" stroke="var(--ink)" stroke-dasharray="4 4"/>
+          <text class="dg-node" x="865" y="320" text-anchor="middle">SURFACE HOLD</text>
+          <text class="dg-sub"  x="865" y="337" text-anchor="middle">the one terminal state</text>
+
+          <!-- legend -->
+          <line x1="128" y1="437" x2="164" y2="437" stroke="var(--ink)" stroke-width="1.6" marker-end="url(#ah)"/>
+          <text class="dg-legend" x="172" y="441">transition</text>
+          <line x1="268" y1="437" x2="304" y2="437" stroke="var(--d4)" stroke-width="2" marker-end="url(#ah-latch)"/>
+          <text class="dg-legend" x="312" y="441">latch-mediated</text>
+          <line x1="442" y1="437" x2="478" y2="437" stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="6 5" opacity="0.5" marker-end="url(#ah-gone)"/>
+          <text class="dg-legend" x="486" y="441">absent by construction</text>
+        </svg>
+      </div>
+      <figcaption>
+        <b>Figure 2 · why no zero-progress cycle exists</b><br>
+        Edge labels use <code>v</code> for vehicle depth, <code>T</code> for the overshoot threshold. The subgraph induced on the two zero-velocity states contains exactly one edge, <code>ALT_CORRECTION → OBSTACLE_CLEAR</code>; the return edge is absent, so that subgraph is acyclic and every path between the two must leave through the forward-progress region above. The self-transitions are bounded separately: <code>ALT_CORRECTION</code> descends against a command bounded by the grid floor, and <code>OBSTACLE_CLEAR</code> ascends toward a monotone target on a discrete grid that is clamped at zero — so each is left in finite time, or the vehicle arrives at the surface with an unreachable target, which is the sole state from which forward motion does not resume.
+      </figcaption>
+    </figure>
+
+    <div class="body">
       <p>Two honest notes on the guard. It changed no outcome across the full lawnmower mission: <code>OBSTACLE_CLEAR</code> exited to <code>OBSTACLE_HOLD</code> thirty-four times and otherwise persisted, and the forbidden transition never arose — because every rise in that terrain is ahead of the nose, so the forward scan fires and the latch commits, and the latch already forbade it. The guard is therefore a safety net for a case the current scenarios do not produce, and saying so is better than implying it was load-bearing.</p>
       <p>The case that would exercise it is a pinnacle beneath the hull but not ahead of the nose: the footprint rule raises the command and drives an ascent while the forward scan never fires and the latch never commits. A terrain fixture holding exactly that geometry — showing the unguarded logic oscillating and the guarded logic escaping — would be both the regression test this property deserves and a compact figure for the paper.</p>
 
@@ -682,7 +781,7 @@
         <li><strong>1 · The environment.</strong> Reef-slope bathymetry with the vehicle at imaging altitude inside the structure. Establishes that the hazard is continuous.</li>
         <li><strong>2 · Representation.</strong> Occupancy grid to manifold to commanded-depth profile, one panel each, with the unobserved columns visibly flagged.</li>
         <li><strong>3 · The manoeuvre.</strong> The depth-profile figure: commit, the unobservable span, release after tail clearance.</li>
-        <li><strong>4 · Mode structure.</strong> The hybrid automaton, with the commitment and sequencing paths drawn as separate channels — this figure <em>is</em> the argument.</li>
+        <li><strong>4 · Mode structure and the liveness argument.</strong> The transition graph of §8 — commitment and sequencing as separate channels, the two zero-velocity states banded together, and the absent edge drawn as absent. This figure <em>is</em> two arguments at once, which is why it earns a full column.</li>
         <li><strong>Table I · Results.</strong> The controllers — task priority and its two additions, the original deployed method, and this one — with commitment and sequencing columns, time-on-altitude, clearance and collisions.</li>
         <li><strong>5 · Contention.</strong> Set-based occupancy against altitude convergence as dwell increases; the dwell sweep on the same axes. The mechanism made visible.</li>
         <li><strong>6 · Real reef slope.</strong> A recorded transect: reconstructed bathymetry, the mode trace this controller produces on the logged sensor stream, and the depth the earlier method actually flew alongside what this one would have commanded. Label the counterfactual as such in the caption.</li>

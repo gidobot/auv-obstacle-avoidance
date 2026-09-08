@@ -516,31 +516,35 @@
       <ul>
         <li><span class="chip chip-need">do</span> <strong>Sweep the dwell duration.</strong> §5 predicts no setting escapes the trade-off. If one does, the necessity claim is wrong and the paper changes. This is the single most important remaining experiment.</li>
         <li><span class="chip chip-need">do</span> <strong>Formal model and check</strong> for the safety and termination properties.</li>
-        <li><span class="chip chip-need">do</span> <strong>Fly the reef mesh in simulation.</strong> Load the Metashape reconstructions and re-run the controller comparison on them. Needs ray–triangle intersection in the three sensor simulators rather than the current height-field test, for the reason given below. Largest gain in the paper per hour spent.</li>
+        <li><span class="chip chip-need">do</span> <strong>Decide whether the Python simulator also needs the mesh.</strong> If the overhang claim is to be tested there rather than in SITL, its sensors need ray–triangle intersection rather than the current height-field test — see below. If SITL carries that claim instead, the Python instrument can stay on parameterised terrain, which is what it is good at.</li>
+        <li><span class="chip chip-need">do</span> <strong>Run both controllers in Gazebo SITL over the reef reconstruction.</strong> Headline closed-loop results, with both as their real implementations. The original is recoverable from version control at the commit before oa-mapper replaced it, and doubles as the simulator-fidelity arm.</li>
         <li><span class="chip chip-need">do</span> <strong>Reconstruction coverage check.</strong> Confirm the mesh is dense where the counterfactual trajectories would fly, not only where the earlier controller went.</li>
         <li><span class="chip chip-need">do</span> <strong>A cliff regression case that validates rather than detects.</strong> The current one is degenerate: past the step the vehicle sits below the surface and the caster hits on every beam.</li>
       </ul>
-      <h3>Three tiers of evidence, and what each may claim</h3>
-      <p>The field data is extensive and from genuinely complex reef slopes, but the vehicle flew a different and much simpler avoidance method at the time. That constrains what replay can support, and the constraint should be stated before a reviewer states it.</p>
+      <h3>Three instruments, and what each is for</h3>
+      <p>The field data is extensive and from genuinely complex reef slopes, but the vehicle flew a different and much simpler avoidance method at the time. That constrains what each instrument can support, and the constraints should be stated before a reviewer states them.</p>
       <ul>
-        <li><strong>Tier 1 — closed loop, synthetic terrain.</strong> <span class="chip chip-have">have</span> The parameterised sawtooth: controlled, repeatable, sweepable, and the only tier where the controllers can be made to differ under identical conditions. It cannot speak to real structure.</li>
-        <li><strong>Tier 2 — closed loop on the photogrammetric reef mesh.</strong> <span class="chip chip-need">do</span> Dense, metrically accurate Metashape reconstructions from the vehicle's own stereo imagery, flown as missions in simulation. Real rugosity at the scale the vehicle actually cares about, and repeatable across controllers — which the real vehicle can never provide. This is far stronger than a height map rasterised from sonar returns, and it is the tier that carries the paper.</li>
-        <li><strong>Tier 3 — open-loop replay, recorded sensor streams.</strong> <span class="chip chip-have">have</span> The algorithm consuming real DVL, altimeter and sonar returns along the real trajectory. Demonstrates the perception stack on real reef data, produces interpretable mode traces against real bathymetry, and supports a per-cycle counterfactual: given this recorded state, what would the controller have commanded, and how does that differ from what flew.</li>
+        <li><strong>A — Gazebo SITL over the reef reconstruction.</strong> <span class="chip chip-need">to run</span> The full AUV stack with the photogrammetric mesh loaded: real nodes, real LCM traffic, real vehicle dynamics, real timing. Both controllers run as <em>their own implementations</em> rather than ports, which removes the "did you reimplement the baseline faithfully" objection entirely. This is the primary closed-loop evidence and the headline results should come from here.</li>
+        <li><strong>B — the Python simulator on parameterised terrain.</strong> <span class="chip chip-have">have</span> Cheap enough for what A cannot afford: fifteen noise realisations across five controllers, dwell and horizon sweeps, ablations that isolate one mechanism at a time. Synthetic terrain is a feature here, not a compromise — it is the only way to hold everything else fixed. This is where the contention result is <em>established</em>; A is where it is <em>confirmed</em>.</li>
+        <li><strong>C — open-loop replay on recorded sensor streams.</strong> <span class="chip chip-have">have</span> The algorithm consuming real DVL, altimeter and sonar returns along the real trajectory. The only instrument that exercises real sensing with real failure modes — dropouts, multipath, beam-quality variation — none of which A or B produce. Supports per-cycle counterfactuals against the method that actually flew.</li>
       </ul>
-      <div class="claim">
-        <p>Replay is open loop. The vehicle followed the earlier controller, so the recorded trajectory is not the one this controller would have flown, and the map depends on where the vehicle went. A claim about a single cycle — <em>given this state, it would have commanded a climb</em> — is sound. A claim about a trajectory — <em>it would have avoided this</em> — is not, beyond the horizon over which the two controllers agree. Quantify that horizon and report it rather than letting a reviewer ask.</p>
-      </div>
-      <h3>Height field or mesh — this decides whether the overhang claim is testable</h3>
-      <p>The simulator's sensors march a ray and test it against <code>terrain_fn(x, y)</code>, a height field. Sampling the mesh into one is a few lines and works immediately, but a height field is built by keeping the topmost surface per cell — <em>the same upper-envelope convention the manifold uses</em>. Sensors that cannot see beneath an overhang, feeding a representation that cannot express one, would agree by construction. Any overhang result from that setup is circular, and a reviewer who notices will discount the section.</p>
-      <p>Ray–triangle intersection against the mesh removes the circularity: a beam can return the underside of an overhang, the map must then decide what to do with it, and §3's claim — that the planner commands over structure and never under it — becomes a measurement rather than a restatement of the assumption. That is the version worth building, and it is confined to the three <code>_simulate_*</code> methods.</p>
+      <p>State the division of labour explicitly in the paper. A reviewer who sees synthetic-terrain sweeps <em>and</em> full-stack runs on real bathymetry <em>and</em> replay on real returns will read it as a considered experimental design; the same three presented without the rationale reads as three attempts at the same thing.</p>
 
-      <h3>What mesh simulation still is not</h3>
+      <h3>Fly the original controller in SITL — it validates the instrument</h3>
+      <p>The controller that flew these missions is recoverable in full from version control, immediately prior to its replacement. It is a reactive altitude-following method: take the smaller of the sonar and nav altitudes, halt when too close, ramp forward velocity down on altitude error, with a rise-over routine that accrued a later fix described as helping it "resolve if stuck".</p>
+      <p>Running it in SITL is worth having as a comparison arm — a baseline that genuinely flew, from before this work existed, is far harder to dismiss than one built for the paper. But that is the lesser reason.</p>
+      <div class="claim">
+        <p>The greater reason is that it validates the instrument. The same binary flew the real mission over this reef and can fly it again over its reconstruction. Comparing the two answers the question every reviewer has about simulation on real geometry — <em>does it reproduce reality?</em> — with a measurement rather than an assurance. And because it is the same code, any divergence is attributable to the simulation itself, not to a reimplementation. Establish fidelity once with the old controller and every other arm inherits it.</p>
+      </div>
+      <p>Design it as distributions rather than trajectories: nav drift and disturbances guarantee divergence over a full mission even under identical control, so compare mode occupancy, altitude and clearance histograms over bounded windows. Treat a negative result as a result — if SITL does not reproduce the old controller's behaviour, that is worth knowing before the paper rests on it, and it points at the sensor or dynamics model rather than at the terrain.</p>
+
+      <h3>What none of the three is</h3>
       <ul>
-        <li><strong>Simulated acoustics.</strong> Ray-cast returns have none of the multipath, dropout structure or beam-quality variation of a real DVL, and the sonar noise model is plain Gaussian. The sensor gating this system depends on is exercised far more honestly by tier 3.</li>
-        <li><strong>Perfect navigation.</strong> No INS or DVL drift, where the real mission accumulates it and the map degrades accordingly.</li>
+        <li><strong>Not a closed-loop field trial.</strong> No instrument here has this controller commanding the real vehicle over real reef. Say so once, plainly, and the rest of the evaluation reads as honest rather than as an omission.</li>
+        <li><strong>Simulated acoustics, even in SITL.</strong> Sensor plugins approximate the returns; multipath, dropout structure and beam-quality variation belong to instrument C alone. The gating logic this system depends on is exercised properly only there.</li>
         <li><strong>Reconstruction coverage is not neutral.</strong> The mesh comes from imagery the vehicle collected while flying the earlier controller, so it is densest where that controller went — and potentially thin exactly where this one would fly differently, such as closer over crests the old method stood off from. Check coverage against the counterfactual trajectories rather than assuming it.</li>
+        <li><strong>Watch the collision mesh.</strong> A dense photogrammetric reconstruction has to be decimated for physics, and decimation removes small-scale relief first — which is precisely the rugosity the controller is responding to. Confirm the decimated mesh still carries structure at the vehicle's own length scale, or the simulation will quietly flatter every controller equally.</li>
       </ul>
-      <p>None of these are reasons not to do it; they are the sentences that keep the section credible, and they are why tiers 2 and 3 are complementary rather than redundant. Tier 2 gives closed-loop numbers on real geometry; tier 3 gives real sensing with real failure modes. Neither alone is field validation, and the paper is stronger for saying which is which.</p>
 
       <p>The weak method that actually flew is an asset rather than an embarrassment: it is a real-world baseline with a real outcome. Where it lost altitude or closed on terrain, the per-cycle counterfactual shows what this controller would have commanded at that same state — which is exactly the defensible form of the claim, and more persuasive on real reef slopes than any synthetic scenario.</p>
 
@@ -599,7 +603,7 @@
         <li><strong>2 · Representation.</strong> Occupancy grid to manifold to commanded-depth profile, one panel each, with the unobserved columns visibly flagged.</li>
         <li><strong>3 · The manoeuvre.</strong> The depth-profile figure: commit, the unobservable span, release after tail clearance.</li>
         <li><strong>4 · Mode structure.</strong> The hybrid automaton, with the commitment and sequencing paths drawn as separate channels — this figure <em>is</em> the argument.</li>
-        <li><strong>Table I · Results.</strong> Five controllers, commitment and sequencing columns, time-on-altitude, clearance, collisions.</li>
+        <li><strong>Table I · Results.</strong> The controllers — task priority and its two additions, the original deployed method, and this one — with commitment and sequencing columns, time-on-altitude, clearance and collisions.</li>
         <li><strong>5 · Contention.</strong> Set-based occupancy against altitude convergence as dwell increases; the dwell sweep on the same axes. The mechanism made visible.</li>
         <li><strong>6 · Real reef slope.</strong> A recorded transect: reconstructed bathymetry, the mode trace this controller produces on the logged sensor stream, and the depth the earlier method actually flew alongside what this one would have commanded. Label the counterfactual as such in the caption.</li>
       </ul>
@@ -651,9 +655,12 @@
           <tr><td>Reef-slope logs + photogrammetric meshes</td>
               <td><span class="chip chip-have">recorded</span></td>
               <td>Extensive and metrically accurate — but flown under a different, simpler controller</td></tr>
-          <tr><td>Closed-loop missions on the reef mesh</td>
+          <tr><td>Gazebo SITL runs on the reef reconstruction</td>
               <td><span class="chip chip-need">not run</span></td>
-              <td>The decisive one, and reachable from data in hand. See §8</td></tr>
+              <td>The decisive one — full stack, both controllers as their real implementations</td></tr>
+          <tr><td>Simulator fidelity against a real deployment</td>
+              <td><span class="chip chip-need">not run</span></td>
+              <td>Fly the original controller in SITL and compare with what it did in the water</td></tr>
           <tr><td>Formal safety/termination proof</td>
               <td><span class="chip chip-need">not run</span></td>
               <td>Would be a substantial addition; large effort</td></tr>

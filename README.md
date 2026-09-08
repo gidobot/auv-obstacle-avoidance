@@ -162,6 +162,7 @@ implementation of the algorithm; `test_occupancy_map.py` is what guards it.
 | `visualizer.py` | Browser-based real-time visualizer using WebSocket streaming. |
 | `lcm_playback_visualizer.py` | Replays an LCM log (or a live feed) through the mapper; mirrors `oa_mapper.cpp`'s sensor gating. |
 | `test_occupancy_map.py` | Behavioural tests for the core. |
+| `docs/commitment-under-occlusion.html` | Positioning and section outline for a publication on the method. Open it in a browser. |
 
 > A Python implementation of the algorithm (`occupancy_map.py`) was maintained
 > alongside the C++ as the original prototype.  It was removed once the C++ was

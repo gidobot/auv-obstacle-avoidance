@@ -3,7 +3,13 @@ project(auv_obstacle_avoidance CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+# Eigen (header-only).  Prefer the imported target from Eigen's own CMake
+# package config, but fall back to a bare include path — consumer build images
+# vary.  Some ship the Eigen headers without the config package, and some
+# (acfr-lcm) put a module-mode FindEigen3 on CMAKE_MODULE_PATH that sets
+# EIGEN3_INCLUDE_DIR without ever defining the Eigen3::Eigen target.  NO_MODULE
+# keeps this lookup in config mode so a consumer's module cannot shadow it.
+find_package(Eigen3 3.3 QUIET NO_MODULE)
 
 # ---------------------------------------------------------------------------
 # auv_oavoid — the LCM-free, Python-free core.  This is the only target a
@@ -12,8 +18,24 @@ find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 add_library(auv_oavoid STATIC src/occupancy_map.cpp)
 target_include_directories(auv_oavoid PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
-target_link_libraries(auv_oavoid PUBLIC Eigen3::Eigen)
 set_target_properties(auv_oavoid PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+if(TARGET Eigen3::Eigen)
+    target_link_libraries(auv_oavoid PUBLIC Eigen3::Eigen)
+else()
+    find_path(AUV_OAVOID_EIGEN_INCLUDE_DIR
+              NAMES Eigen/Dense
+              HINTS ${EIGEN3_INCLUDE_DIR} ${EIGEN3_INCLUDE_DIRS}
+              PATHS /usr/include /usr/local/include
+              PATH_SUFFIXES eigen3)
+    if(NOT AUV_OAVOID_EIGEN_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "auv_oavoid: Eigen3 not found.  Install it (Ubuntu/Debian: "
+            "sudo apt install libeigen3-dev), or pass -DEIGEN3_INCLUDE_DIR=<path>.")
+    endif()
+    message(STATUS "auv_oavoid: using Eigen headers at ${AUV_OAVOID_EIGEN_INCLUDE_DIR}")
+    target_include_directories(auv_oavoid PUBLIC ${AUV_OAVOID_EIGEN_INCLUDE_DIR})
+endif()
 
 # ---------------------------------------------------------------------------
 # Python extension — built only when this project is configured standalone.

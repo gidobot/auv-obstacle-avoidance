@@ -396,7 +396,7 @@
       </div>
       <p>Columns without a real observation are flagged rather than guessed at, so the avoidance checks skip them instead of triggering on the grid-floor default — the representation carries its own uncertainty rather than pretending to completeness. The 13.3% figure is the post-turn low, when the heading gate has invalidated the map and it is rebuilding; that recovery window is where the planner's rule of commanding the vehicle column from the most conservative source available — the shallowest manifold across the hull footprint, or the latest direct altitude return if shallower — earns its place.</p>
       <p>Overhangs deserve their own sentence, because they are named among the reef hazards and an upper envelope cannot represent them. What it does instead is take the shallowest occupied voxel in each column, so an overhang's underside <em>becomes</em> the manifold and the vehicle is commanded above it: the planner always goes over structure, never under it. That is the conservative failure mode, and for a downward-imaging survey it is arguably the correct one — the cost is coverage beneath the overhang, not safety. Worth claiming as a property rather than conceding as a gap.</p>
-      <p>The genuine limitation is the projection itself: it is valid only while heading is roughly constant. That belongs in §10, not buried.</p>
+      <p>The genuine limitation is the projection itself: it is valid only while heading is roughly constant. That belongs in §11, not buried.</p>
     </div>
   </section>
 
@@ -405,7 +405,7 @@
     <div class="body">
       <p>The test terrain is a parameterised proxy for reef rugosity rather than a reef itself: a repeatable, tunable worst case that isolates the control question. A 4-leg lawnmower flown across a 70° sawtooth ridge field — 20 m teeth on a 30 m seafloor with 10 m flats — with legs along the axis the teeth progress on, so each 40 m leg crosses roughly two and a third crests. The vehicle launches at the surface; the descent is excluded. Each leg transition is two 90° on-the-spot yaws, which exceed the stale-heading gate and invalidate the map.</p>
       <p>All controllers <strong>share the deployed perception stack</strong> — the same occupancy grid, the same cliff manifold, the same measurements. Only the arbitration differs, so any difference measured is a property of the control law. Each condition is 15 noise realisations, the same seeds across controllers.</p>
-      <p>The simulator also carries a procedural reef generator — bommies, terraces, cliff-like faults — which is the more representative scenario and is listed in §8 as outstanding. The sawtooth is what the current numbers come from, and the paper should say so plainly.</p>
+      <p>The simulator also carries a procedural reef generator — bommies, terraces, cliff-like faults — which is the more representative scenario and is listed in §9 as outstanding. The sawtooth is what the current numbers come from, and the paper should say so plainly.</p>
       <p>The figure of merit is time held at imaging altitude, not ground covered: halting to reach altitude before moving on is correct behaviour for this survey, so scoring coverage would penalise the right answer.</p>
     </div>
 
@@ -465,7 +465,7 @@
       </div>
       <p>Commitment is expressed by holding a set-based task active. Sequencing is expressed by the altitude task running long enough to converge. In a priority hierarchy both are the same variable — which task is active — so every cycle spent committed is a cycle not spent converging. The trade is structural, not a tuning artefact.</p>
       <p>The supervisory design does not face it, because the two live in different places: the cliff latch governs the depth target held through an obstacle traverse, while mode selection governs whether the vehicle surges. They compose instead of contending.</p>
-      <p>This is the paper's core argument and it is falsifiable: if some dwell duration escapes the trade-off, the claim is wrong. See §8.</p>
+      <p>This is the paper's core argument and it is falsifiable: if some dwell duration escapes the trade-off, the claim is wrong. See §9.</p>
     </div>
   </section>
 
@@ -504,7 +504,43 @@
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">08</span><h2>Evidence: held and outstanding</h2></div>
+    <div class="sec-head"><span class="num">08</span><h2>Proving no zero-progress livelock</h2></div>
+    <div class="body">
+      <p>The controller this one replaced could livelock — its history carries a fix described as helping the rise-over routine "resolve if stuck". Ruling that out by construction is a claim worth making, and the mode logic is small enough to support it. What follows is the argument, its obligations on the implementation, and the one obligation the code does not currently meet.</p>
+
+      <h3>The property</h3>
+      <div class="claim">
+        <p>Every maximal interval of control cycles commanding zero forward speed is finite, except one: the vehicle held at the surface constraint by a target it cannot reach. Mission termination aside, that is the only state from which forward progress does not resume.</p>
+      </div>
+
+      <h3>Facts established from the implementation</h3>
+      <p>Three properties of the mode logic, checked exhaustively over the transition function rather than argued informally:</p>
+      <ul>
+        <li>Zero forward speed occurs in exactly two modes, <code>OBSTACLE_CLEAR</code> and <code>ALT_CORRECTION</code>. The other three command <code>survey_speed</code>.</li>
+        <li>Within <code>OBSTACLE_CLEAR</code> the Schmitt band holds the mode only while <code>dz &lt; −(T−h)</code>, so the separate 0.1 m test that gates speed there is always satisfied: forward speed is identically zero in that mode, never intermittent.</li>
+        <li>The branch handling both mode predicates being true simultaneously is <strong>unreachable</strong> — no combination of previous mode and depth error satisfies both. The automaton has three outcomes, not four, which is worth stating because it removes a case from the proof.</li>
+      </ul>
+
+      <h3>The argument</h3>
+      <p>Write <code>dz = cmd_depth[cx] − vehicle_depth</code>, threshold <code>T</code>, hysteresis <code>h</code>, and <code>inside = T − h</code>.</p>
+      <ul>
+        <li><strong>ALT_CORRECTION cannot persist.</strong> The mode holds only while <code>dz &gt; inside</code>. Commanded depth is bounded above by the grid floor, and the vehicle descends at <code>vertical_speed</code> throughout, so <code>dz</code> strictly decreases and the mode is left after at most <code>(dz₀ − inside) / (vertical_speed · dt)</code> cycles. No terminal case.</li>
+        <li><strong>OBSTACLE_CLEAR persists only toward the surface.</strong> The mode holds only while <code>dz &lt; −inside</code>, meaning the target lies above the vehicle, and the vehicle ascends throughout. Commanded depth is clamped at zero by construction, and the latch's target ratchets shallower only — monotone and bounded below. Because those values live on the grid's <code>dz</code> quantisation, monotone and bounded gives <em>finitely many</em> changes rather than mere asymptotic convergence, which is what closes the argument in finite time rather than in the limit. So the target becomes constant, the vehicle reaches it and leaves the mode with forward speed restored — or the vehicle reaches zero depth first, which is the permitted terminal state.</li>
+        <li><strong>Cycling between the two requires passing through a forward-progress mode</strong> — provided the depth error cannot jump the whole hysteresis structure in one cycle. This is the step that needs an assumption, and it is where the implementation falls short.</li>
+      </ul>
+
+      <h3>The obligation the code does not meet</h3>
+      <p>A direct <code>OBSTACLE_CLEAR → ALT_CORRECTION</code> transition is possible. The mode is held while <code>dz &lt; −inside</code> and entered at <code>dz ≥ T</code>, so a single-cycle change of <code>|Δdz| &gt; 2T − h</code> skips the band entirely and the vehicle never commands forward speed between them. With the deployed thresholds that is 1.5 m in one control cycle.</p>
+      <p>The vehicle's own motion contributes at most <code>vertical_speed · dt</code> to that, which is 0.05 m. The rest would have to come from <code>cmd_depth[cx]</code>, and <strong>nothing in the implementation bounds how far that may move between cycles</strong> — a single sensor update can relocate the manifold arbitrarily. The proof therefore rests on an assumption the code does not currently enforce.</p>
+      <p>The remedy is a slew limit on the vehicle-column command. The bound needed is generous: under 1.45 m per cycle, or about 14.5 m/s of command rate at 10 Hz, so a limit of a few tenths of a metre per cycle would guarantee the property while remaining far faster than the vehicle can physically respond. It also costs nothing in reaction time, because the vehicle cannot follow a step larger than <code>vertical_speed · dt</code> regardless.</p>
+
+      <h3>What this is and is not</h3>
+      <p>This is a proof about the mode logic given a bounded command signal — worth stating precisely as that. It is not a proof about the mapping, the sensors, or the vehicle's ability to follow the command, and it says nothing about whether the commanded depth is <em>correct</em>; §7 covers what safety would require. Model checking the automaton would confirm the case analysis mechanically and is the natural next step, but the finite-time bounds above are the substance and they come from monotonicity, not from search.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="num">09</span><h2>Evidence: held and outstanding</h2></div>
     <div class="body">
       <h3>In hand</h3>
       <ul>
@@ -517,7 +553,8 @@
       <h3>Outstanding</h3>
       <ul>
         <li><span class="chip chip-need">do</span> <strong>Sweep the dwell duration.</strong> §5 predicts no setting escapes the trade-off. If one does, the necessity claim is wrong and the paper changes. This is the single most important remaining experiment.</li>
-        <li><span class="chip chip-need">do</span> <strong>Formal model and check</strong> for the safety and termination properties.</li>
+        <li><span class="chip chip-need">do</span> <strong>Bound the vehicle-column command slew</strong> — §8. The livelock proof needs it and the code does not enforce it. Small change, generous bound, and it converts the property from assumed to guaranteed.</li>
+        <li><span class="chip chip-need">do</span> <strong>Model-check the mode automaton</strong> to confirm the case analysis of §8 mechanically, and the safety property of §7 alongside it.</li>
         <li><span class="chip chip-need">do</span> <strong>Run both controllers in Gazebo SITL over the reef reconstruction.</strong> Headline closed-loop results, with both as their real implementations. The original is recoverable from version control at the commit before oa-mapper replaced it, and doubles as the simulator-fidelity arm.</li>
         <li><span class="chip chip-need">do</span> <strong>Run the sawtooth in SITL too.</strong> Same geometry as the Python sweeps, full stack. Cheap to set up from the same parametric definition, and it is what licenses the sweeps as evidence rather than as illustration.</li>
         <li><span class="chip chip-need">do</span> <strong>Reconstruction coverage check.</strong> Confirm the mesh is dense where the counterfactual trajectories would fly, not only where the earlier controller went.</li>
@@ -587,7 +624,7 @@
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">09</span><h2>Proposed structure</h2></div>
+    <div class="sec-head"><span class="num">10</span><h2>Proposed structure</h2></div>
     <div class="body">
       <p>Eight pages — the six-page RA-L base plus the two over-length pages — with the conference option for the talk. That is roughly two pages more than the minimum cut, and the right place to spend them is the representation and the results, not a longer introduction. Verify the current page and fee rules against the call; they move.</p>
     </div>
@@ -606,7 +643,7 @@
       </div></li>
       <li><span class="o-num">IV</span><div>
         <p class="o-title">Supervisory controller · ~1.25 pp</p>
-        <p class="o-note">Mode set, priority order, the latch with its monotone ratchets and release conditions, and the vehicle-column rule taking the most conservative available source. Present as a hybrid automaton, with the separation of commitment from sequencing made explicit — this is what the results then test.</p>
+        <p class="o-note">Mode set, priority order, the latch with its monotone ratchets and release conditions, and the vehicle-column rule taking the most conservative available source. Present as a hybrid automaton, with the separation of commitment from sequencing made explicit — this is what the results then test. Close with the no-livelock property of §8: finite-time bounds on both zero-progress modes, the surface as the sole terminal state, and the slew condition it rests on. Half a column, and it is the kind of guarantee the method this replaced could not offer.</p>
       </div></li>
       <li><span class="o-num">V</span><div>
         <p class="o-title">Task-priority baseline · ~0.75 pp</p>
@@ -647,7 +684,7 @@
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">10</span><h2>Limitations to state first</h2></div>
+    <div class="sec-head"><span class="num">11</span><h2>Limitations to state first</h2></div>
     <div class="body">
       <ul>
         <li><strong>The map assumes locally straight transects.</strong> Collapsing 3-D structure into a vehicle-relative vertical slice is valid only while heading is roughly constant; the 45° staleness gate is an admission of this and should be presented as a scope condition of the representation, not a tuning knob.</li>
@@ -660,7 +697,7 @@
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">11</span><h2>Venue and anchors</h2></div>
+    <div class="sec-head"><span class="num">12</span><h2>Venue and anchors</h2></div>
     <div class="body">
       <p><strong>Decided: RA-L with the conference option, eight pages.</strong> What follows is the inventory that decision has to survive — what is actually in hand, and what must land before submission.</p>
     </div>
@@ -707,7 +744,7 @@
       <h3>Format notes</h3>
       <ul>
         <li>RA-L review is fast but unforgiving of overclaiming. Prefer "a single priority hierarchy cannot supply both without trading one against the other, across the range we swept" to "the mode structure is necessary".</li>
-        <li>RA-L takes a supplementary video and reviewers watch them — see §9.</li>
+        <li>RA-L takes a supplementary video and reviewers watch them — see §10.</li>
         <li>The over-length pages carry a fee and the allowance differs between the journal and the conference presentation option. Confirm both against the current call before planning the layout.</li>
         <li>The deployment detail this work has — one version-pinned core shared by vehicle, simulator and replay — is worth a paragraph in Discussion and a sentence in the contributions. It is the kind of thing a marine readership values more than a controls one.</li>
       </ul>

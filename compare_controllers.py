@@ -112,16 +112,24 @@ def tp_dwell_factory(cfg, dvl, sonar, alt):
     hold = (cfg.cliff_standoff + cfg.vehicle_length) / max(cfg.survey_speed, 1e-6)
     return TaskPriorityMapper(cfg, dvl, sonar, alt, dwell_s=hold)
 
+def tp_stop_factory(cfg, dvl, sonar, alt):
+    # Temporal sequencing bolted onto the arbitration: hold station until the
+    # altitude task has converged, using the same overshoot band the deployed
+    # controller uses for its own mode selection.
+    return TaskPriorityMapper(cfg, dvl, sonar, alt, dwell_s=0.0,
+                              stop_to_converge=True)
+
 CONTROLLERS = {
     'latch':    latch_factory,
     'tp':       tp_factory,
     'tp+dwell': tp_dwell_factory,
+    'tp+stop':  tp_stop_factory,
 }
 
 
 # -- run + metrics -----------------------------------------------------------
 
-def run(controller, cfg, dt=0.1, margin_s=120.0, alt_tol=0.5):
+def run(controller, cfg, dt=0.1, margin_s=120.0, alt_tol=0.5, seed=0):
     """Fly the whole lawnmower; return time-on-altitude and safety stats.
 
     The survey objective is to spend as much of the mission as possible at the
@@ -132,6 +140,11 @@ def run(controller, cfg, dt=0.1, margin_s=120.0, alt_tol=0.5):
     flown while on altitude, which is the usable survey line the mission exists
     to acquire.
     """
+    # The sonar model adds unseeded Gaussian range noise, so runs are not
+    # reproducible unless the global RNG is pinned.  Seeding per trial — with
+    # the same seed across controllers — makes the comparison like-for-like:
+    # every controller sees the identical noise realisation.
+    np.random.seed(seed)
     terrain, traj, _ = build_mission(cfg.survey_speed)
     sim = Simulator3D(
         omap_config=cfg,
@@ -219,43 +232,67 @@ def run(controller, cfg, dt=0.1, margin_s=120.0, alt_tol=0.5):
     }
 
 
-def header(title):
-    print(f"\n{title}")
-    print(f"  {'controller':<10} {'t@alt %':>8} {'d@alt m':>8} {'alt rms':>8} "
-          f"{'min clr':>8} {'<0.5m':>6} {'collision':>11}")
-    print(f"  {'-'*10} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*6} {'-'*11}")
+def trials(controller, cfg, seeds):
+    """Aggregate several noise realisations.
+
+    Averages the mission-quality figures and takes the worst case on safety —
+    a controller that collides on one seed in five has a safety problem, not a
+    slightly lower mean.
+    """
+    rs = [run(controller, cfg, seed=s) for s in seeds]
+    return {
+        'controller':    controller,
+        'n':             len(rs),
+        'on_alt_pct':    float(np.mean([r['on_alt_pct'] for r in rs])),
+        'on_alt_sd':     float(np.std([r['on_alt_pct'] for r in rs])),
+        'dist_on_alt':   float(np.mean([r['dist_on_alt'] for r in rs])),
+        'alt_rms':       float(np.mean([r['alt_rms'] for r in rs])),
+        'min_clearance': float(np.min([r['min_clearance'] for r in rs])),
+        'breaches':      int(np.sum([r['breaches'] for r in rs])),
+        'collisions':    int(np.sum([1 for r in rs if r['collided']])),
+    }
+
+
+def header(title, n):
+    print(f"\n{title}   [{n} noise seeds]")
+    print(f"  {'controller':<10} {'t@alt %':>13} {'d@alt m':>8} {'alt rms':>8} "
+          f"{'worst clr':>9} {'<0.5m':>6} {'collided':>9}")
+    print(f"  {'-'*10} {'-'*13} {'-'*8} {'-'*8} {'-'*9} {'-'*6} {'-'*9}")
 
 def show(r):
-    coll = f"s={r['collision_s']:.0f}m" if r['collided'] else "-"
-    print(f"  {r['controller']:<10} {r['on_alt_pct']:8.1f} {r['dist_on_alt']:8.1f} "
-          f"{r['alt_rms']:8.3f} {r['min_clearance']:8.3f} {r['breaches']:6d} {coll:>11}")
+    coll = f"{r['collisions']}/{r['n']}" if r['collisions'] else "-"
+    print(f"  {r['controller']:<10} {r['on_alt_pct']:8.1f}+-{r['on_alt_sd']:<4.1f} "
+          f"{r['dist_on_alt']:8.1f} {r['alt_rms']:8.3f} {r['min_clearance']:9.3f} "
+          f"{r['breaches']:6d} {coll:>9}")
 
 
 # -- sweeps ------------------------------------------------------------------
 
-def sweep_none(rows):
+def sweep_none(rows, seeds):
     cfg = cpp.OccupancyMapConfig()
-    header(f"nominal  (horizon_back {cfg.horizon_back:g} m, survey {cfg.survey_speed:g} m/s)")
+    header(f"nominal  (horizon_back {cfg.horizon_back:g} m, survey {cfg.survey_speed:g} m/s)",
+           len(seeds))
     for ctrl in CONTROLLERS:
-        r = run(ctrl, cfg); r['sweep'], r['value'] = 'nominal', 0.0
+        r = trials(ctrl, cfg, seeds); r['sweep'], r['value'] = 'nominal', 0.0
         rows.append(r); show(r)
 
-def sweep_horizon(rows):
+def sweep_horizon(rows, seeds):
     """Backward horizon controls how much terrain the map remembers behind."""
     for hb in (15.0, 8.0, 4.0, 2.0):
         cfg = cpp.OccupancyMapConfig(); cfg.horizon_back = hb
-        header(f"backward horizon {hb:g} m")
+        header(f"backward horizon {hb:g} m", len(seeds))
         for ctrl in CONTROLLERS:
-            r = run(ctrl, cfg); r['sweep'], r['value'] = 'horizon', hb
+            r = trials(ctrl, cfg, seeds); r['sweep'], r['value'] = 'horizon', hb
             rows.append(r); show(r)
 
-def sweep_speed(rows):
+def sweep_speed(rows, seeds):
     """Forward speed against a fixed depth rate tightens the tail geometry."""
     for vx in (0.5, 1.0, 1.5, 2.0):
         cfg = cpp.OccupancyMapConfig(); cfg.survey_speed = vx
-        header(f"survey speed {vx:g} m/s  (vertical speed {cfg.vertical_speed:g} m/s)")
+        header(f"survey speed {vx:g} m/s  (vertical speed {cfg.vertical_speed:g} m/s)",
+               len(seeds))
         for ctrl in CONTROLLERS:
-            r = run(ctrl, cfg); r['sweep'], r['value'] = 'speed', vx
+            r = trials(ctrl, cfg, seeds); r['sweep'], r['value'] = 'speed', vx
             rows.append(r); show(r)
 
 SWEEPS = {'none': sweep_none, 'horizon': sweep_horizon, 'speed': sweep_speed}
@@ -266,7 +303,10 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--sweep', choices=sorted(SWEEPS) + ['all'], default='none')
     ap.add_argument('--csv', metavar='PATH')
+    ap.add_argument('--seeds', type=int, default=5,
+                    help='noise realisations per condition (default 5)')
     args = ap.parse_args()
+    seeds = list(range(args.seeds))
 
     cfg = cpp.OccupancyMapConfig()
     print(f"mission: {LAWNMOWER['n_legs']} legs x {LAWNMOWER['leg_length']:g} m, "
@@ -280,7 +320,7 @@ def main():
 
     rows = []
     for n in (sorted(SWEEPS) if args.sweep == 'all' else [args.sweep]):
-        SWEEPS[n](rows)
+        SWEEPS[n](rows, seeds)
 
     if args.csv:
         with open(args.csv, 'w', newline='') as fh:
@@ -288,12 +328,14 @@ def main():
             w.writeheader(); w.writerows(rows)
         print(f"\nwrote {args.csv}")
 
-    print("\nt@alt % = share of survey time held within 0.5 m of imaging altitude.")
+    print("\nt@alt % = share of survey time held within 0.5 m of imaging altitude,")
+    print("          mean +- sd across seeds.")
     print("d@alt m = along-track distance flown while on altitude - the usable")
     print("          survey line acquired.  This is the figure of merit.")
     print("alt rms = RMS deviation from the imaging altitude (m).")
     print("min clr = worst clearance over the hull (m); <= 0 is a collision.")
-    print("<0.5m   = control cycles spent inside half a metre of terrain.")
+    print("worst clr = worst hull clearance across all seeds; <= 0 is a collision.")
+    print("<0.5m   = control cycles inside half a metre of terrain, summed over seeds.")
     print("Pattern coverage is deliberately not scored: halting to reach")
     print("altitude before moving on is correct behaviour for this survey.")
     return 0

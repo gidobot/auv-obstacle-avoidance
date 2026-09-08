@@ -45,9 +45,22 @@ measure, the constraint reads as satisfied, and the task deactivates — which i
 the behaviour under test.
 
 ``dwell_s`` optionally holds an activated set-based task for a minimum duration.
-That is the repair: it reintroduces commitment inside the task-priority
-formalism, and the three-way comparison (latch / plain / dwell) is what shows
-the commitment mechanism is necessary rather than stylistic.
+That is one repair: it reintroduces commitment inside the task-priority
+formalism.
+
+``stop_to_converge`` is the other, and it targets the mission objective rather
+than safety.  A priority hierarchy resolves velocities instant by instant; it
+has no way to express *suspend surge until the vertical task has converged*.
+On steep terrain that matters more than anything else, because the seabed
+changes faster than the depth rate can follow, so an advancing vehicle never
+settles onto the imaging altitude at all.  With this enabled the controller
+holds station whenever the altitude task is outside the same overshoot band the
+deployed controller uses, then resumes — temporal sequencing, bolted onto the
+arbitration.
+
+The comparison across latch / plain / dwell / stop is what distinguishes
+"the mode structure is doing something necessary" from "the mode structure is
+one way of writing something task priority could also express".
 """
 
 import numpy as np
@@ -82,15 +95,20 @@ class TaskPriorityMapper:
         dwell_s:  minimum time an activated set-based task stays active.  0.0
                   gives the plain memoryless baseline; a positive value gives
                   the commitment-repaired variant.
+        stop_to_converge: hold station while the imaging-altitude task is
+                  outside the overshoot band, then advance.  Adds temporal
+                  sequencing, which plain priority arbitration cannot express.
     """
 
     def __init__(self, cfg, dvl_cfg, sonar_cfg, alt_cfg=None,
-                 buffer_m=0.25, dwell_s=0.0):
+                 buffer_m=0.25, dwell_s=0.0, stop_to_converge=False):
         self._inner = cpp.ObstacleMapper(
             cfg, dvl_cfg, sonar_cfg, alt_cfg or cpp.AltimeterConfig())
         self.cfg = cfg
         self.buffer_m = float(buffer_m)
         self.dwell_s = float(dwell_s)
+        self.stop_to_converge = bool(stop_to_converge)
+        self._converging = False        # Schmitt state for the stop rule
 
         self._t = 0.0
         self._depth = 0.0
@@ -114,6 +132,7 @@ class TaskPriorityMapper:
         self.control_mode = "ALT_FOLLOW"
         self.active_task = 3
         self.transitions = 0
+        self._converging = False
 
     def update_sensor(self, sensor_type, measurement, pose):
         self._inner.update_sensor(sensor_type, measurement, pose)
@@ -177,6 +196,25 @@ class TaskPriorityMapper:
         required_depth = peak_z - c.imaging_altitude
         return required_depth - self._depth, required_depth
 
+    def _footprint_target_depth(self):
+        """Conservative depth target: shallowest of the hull-footprint manifold
+        and the latest direct vertical range, minus the imaging altitude."""
+        c = self.cfg
+        omap = self._inner.omap
+        x, z, obs = self._manifold_world()
+        v_x = omap.grid_to_world_x(omap.cx)
+        half = c.vehicle_length / 2.0
+        band = obs & (x >= v_x - half) & (x <= v_x + half)
+        cand = []
+        if band.any():
+            cand.append(float(np.min(z[band])))
+        alt = self.get_altitude()
+        if np.isfinite(alt):
+            cand.append(self._depth + alt)
+        if not cand:
+            return np.nan
+        return max(0.0, min(cand) - c.imaging_altitude)
+
     def _set_based(self, task_id, sigma):
         """Activation with a satisfaction buffer and optional dwell."""
         if not np.isfinite(sigma):
@@ -214,7 +252,21 @@ class TaskPriorityMapper:
             target = required_depth if np.isfinite(required_depth) else self._depth
             mode, vtarget, task = "DEPTH_HOLD", target, 2
         else:
-            mode, vtarget, task = "ALT_FOLLOW", c.imaging_altitude, 3
+            # Altitude task.  Target the shallowest of the hull-footprint
+            # manifold and the latest direct altitude return, mirroring the
+            # deployed planner's vehicle-column rule.  Driving this from the
+            # nadir altitude alone would descend one end of the hull into a
+            # slope — the same defect the deployed controller carried until it
+            # was fixed, and leaving it here would make the baseline unfair
+            # rather than merely different.
+            safe_z = self._footprint_target_depth()
+            if np.isfinite(safe_z):
+                mode, vtarget, task = "DEPTH_HOLD", safe_z, 3
+            else:
+                mode, vtarget, task = "ALT_FOLLOW", c.imaging_altitude, 3
+
+        self.active_task = task
+        self.control_mode = {1: "SAFETY_CLEAR", 2: "FWD_CLEAR", 3: "ALT_FOLLOW"}[task]
 
         # Forward speed policy mirrors the latch controller so the comparison is
         # about commitment, not about how fast either one flies: hold station
@@ -224,8 +276,23 @@ class TaskPriorityMapper:
         else:
             vx = c.survey_speed
 
-        self.active_task = task
-        self.control_mode = {1: "SAFETY_CLEAR", 2: "FWD_CLEAR", 3: "ALT_FOLLOW"}[task]
+        # Optional temporal sequencing: hold station until the altitude task has
+        # converged, then advance.  Uses the same overshoot band and hysteresis
+        # as the deployed controller's mode selection, so the two stop for the
+        # same reasons and the comparison stays apples-to-apples.
+        if self.stop_to_converge and task == 3:
+            err = abs(self._depth - vtarget) if mode == "DEPTH_HOLD" else np.nan
+            if np.isfinite(err):
+                if self._converging:
+                    if err < max(0.0, c.altitude_overshoot_threshold_m
+                                 - c.altitude_overshoot_hysteresis_m):
+                        self._converging = False
+                elif err > c.altitude_overshoot_threshold_m:
+                    self._converging = True
+                if self._converging:
+                    vx = 0.0
+                    self.control_mode = "ALT_CONVERGE"
+
         if task != prev:
             self.transitions += 1
         return TPControl(vx, mode, vtarget)

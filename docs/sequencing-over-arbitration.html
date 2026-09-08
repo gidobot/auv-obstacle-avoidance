@@ -271,6 +271,8 @@
   .row-hero td:first-child { font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
   .chip-bad { background: color-mix(in srgb, var(--accent) 16%, transparent);
               color: var(--accent); }
+  .cell-note { font-family: var(--f-mono); font-size: 0.68rem; color: var(--muted);
+               font-weight: 400; }
 
   a { color: var(--accent); text-underline-offset: 2px; }
   a:focus-visible, :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -517,17 +519,40 @@
         <li><span class="chip chip-need">do</span> <strong>Sweep the dwell duration.</strong> §5 predicts no setting escapes the trade-off. If one does, the necessity claim is wrong and the paper changes. This is the single most important remaining experiment.</li>
         <li><span class="chip chip-need">do</span> <strong>Formal model and check</strong> for the safety and termination properties.</li>
         <li><span class="chip chip-need">do</span> <strong>Run both controllers in Gazebo SITL over the reef reconstruction.</strong> Headline closed-loop results, with both as their real implementations. The original is recoverable from version control at the commit before oa-mapper replaced it, and doubles as the simulator-fidelity arm.</li>
+        <li><span class="chip chip-need">do</span> <strong>Run the sawtooth in SITL too.</strong> Same geometry as the Python sweeps, full stack. Cheap to set up from the same parametric definition, and it is what licenses the sweeps as evidence rather than as illustration.</li>
         <li><span class="chip chip-need">do</span> <strong>Reconstruction coverage check.</strong> Confirm the mesh is dense where the counterfactual trajectories would fly, not only where the earlier controller went.</li>
         <li><span class="chip chip-need">do</span> <strong>A cliff regression case that validates rather than detects.</strong> The current one is degenerate: past the step the vehicle sits below the surface and the caster hits on every beam.</li>
       </ul>
-      <h3>Three instruments, and what each is for</h3>
-      <p>The field data is extensive and from genuinely complex reef slopes, but the vehicle flew a different and much simpler avoidance method at the time. That constrains what each instrument can support, and the constraints should be stated before a reviewer states them.</p>
+      <h3>Two axes, not a quality ladder</h3>
+      <p>Terrain and stack fidelity are independent choices. Synthetic parameterised terrain runs in Gazebo as readily as a photogrammetric mesh does, so the real distinction between instruments is cost per run — which decides what experiments are affordable, not what they are worth.</p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th></th><th>Synthetic sawtooth</th><th>Reconstructed reef mesh</th></tr></thead>
+        <tbody>
+          <tr><td>Python sim<br><span class="cell-note">seconds per run</span></td>
+              <td><span class="chip chip-have">have</span> Seeds, sweeps, single-mechanism ablations. Everything held fixed but the one variable under test.</td>
+              <td>Not needed. Height-field sensing cannot represent the geometry that makes a mesh worth having — see below.</td></tr>
+          <tr><td>Gazebo SITL<br><span class="cell-note">minutes per run</span></td>
+              <td><span class="chip chip-need">to run</span> Same geometry as the cheap instrument, full stack. Cross-validates the sweeps.</td>
+              <td><span class="chip chip-need">to run</span> Headline closed-loop results, and the arm that measures fidelity against the water.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="body">
+      <p>Open-loop replay on the recorded sensor streams sits outside the table: it is the only instrument that sees real dropouts, multipath and beam-quality variation, none of which any simulator produces, and it supports per-cycle counterfactuals against the method that actually flew.</p>
+
+      <h3>The validation chain</h3>
+      <p>Read as a chain rather than as four experiments, the design answers the obvious objection to every cell:</p>
       <ul>
-        <li><strong>A — Gazebo SITL over the reef reconstruction.</strong> <span class="chip chip-need">to run</span> The full AUV stack with the photogrammetric mesh loaded: real nodes, real LCM traffic, real vehicle dynamics, real timing. Both controllers run as <em>their own implementations</em> rather than ports, which removes the "did you reimplement the baseline faithfully" objection entirely. This is the primary closed-loop evidence and the headline results should come from here.</li>
-        <li><strong>B — the Python simulator on parameterised terrain.</strong> <span class="chip chip-have">have</span> Height-field terrain by design, not by limitation — see below. Cheap enough for what A cannot afford: fifteen noise realisations across five controllers, dwell and horizon sweeps, ablations that isolate one mechanism at a time. Synthetic terrain is a feature here, not a compromise — it is the only way to hold everything else fixed. This is where the contention result is <em>established</em>; A is where it is <em>confirmed</em>.</li>
-        <li><strong>C — open-loop replay on recorded sensor streams.</strong> <span class="chip chip-have">have</span> The algorithm consuming real DVL, altimeter and sonar returns along the real trajectory. The only instrument that exercises real sensing with real failure modes — dropouts, multipath, beam-quality variation — none of which A or B produce. Supports per-cycle counterfactuals against the method that actually flew.</li>
+        <li><strong>Python sawtooth against SITL sawtooth.</strong> Identical geometry, different stack. Agreement means the cheap instrument's sweeps can be trusted, which matters because fifteen seeds across five controllers with parameter sweeps is affordable nowhere else. Disagreement is diagnostic — it isolates the kinematic model, since terrain is held fixed.</li>
+        <li><strong>SITL reef against the real mission.</strong> The original controller's own binary, over the reconstruction of the reef it actually surveyed. Agreement means the simulation reproduces the deployment; because it is the same code, divergence is attributable to the simulator rather than to a reimplementation.</li>
       </ul>
-      <p>State the division of labour explicitly in the paper. A reviewer who sees synthetic-terrain sweeps <em>and</em> full-stack runs on real bathymetry <em>and</em> replay on real returns will read it as a considered experimental design; the same three presented without the rationale reads as three attempts at the same thing.</p>
+      <div class="claim">
+        <p>Chained, those two bridges carry credibility from the water back to the cheap sweeps: the parameter studies are trusted because SITL agrees with them on identical terrain, and SITL is trusted because it reproduces what the vehicle actually did. That is a stronger methodological position than any single instrument can hold, and it costs two comparisons rather than new apparatus.</p>
+      </div>
 
       <h3>Fly the original controller in SITL — it validates the instrument</h3>
       <p>The controller that flew these missions is recoverable in full from version control, immediately prior to its replacement. It is a reactive altitude-following method: take the smaller of the sonar and nav altitudes, halt when too close, ramp forward velocity down on altitude error, with a rise-over routine that accrued a later fix described as helping it "resolve if stuck".</p>

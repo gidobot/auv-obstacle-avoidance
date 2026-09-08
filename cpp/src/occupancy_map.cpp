@@ -524,6 +524,25 @@ void OccupancyMap::set_mode_from_cmd_depth(double vehicle_depth) {
     bool obstacle_clear = (dz <= -T) || (prev == "OBSTACLE_CLEAR" && dz < -inside);
     bool altitude_correction = (dz >= T) || (prev == "ALT_CORRECTION" && dz > inside);
 
+    // An ascent, once begun, is completed: OBSTACLE_CLEAR never turns straight
+    // into a descent.  While climbing, the vehicle has not moved, so nothing
+    // about the geometry that justified the climb has changed except its own
+    // altitude — and a command to descend at that moment means the beams have
+    // begun to see past the obstacle, which is exactly the observation this
+    // design refuses to act on mid-manoeuvre.  The legitimate version of that
+    // transition happens after the vehicle has flown over the feature, from
+    // OBSTACLE_HOLD.
+    //
+    // It is also what closes the no-livelock argument.  OBSTACLE_CLEAR can then
+    // only exit to a mode that commands forward speed, so the two zero-progress
+    // modes cannot alternate; with ALT_CORRECTION unable to persist against a
+    // bounded command and a monotone descent, the sole unbounded zero-progress
+    // state is the vehicle held at the surface by an unreachable target.
+    if (altitude_correction && !obstacle_clear && prev == "OBSTACLE_CLEAR") {
+        control_mode_ = "ALT_FOLLOW";
+        return;
+    }
+
     if (obstacle_clear && altitude_correction) {
         if (dz <= -inside) {
             control_mode_ = "OBSTACLE_CLEAR";

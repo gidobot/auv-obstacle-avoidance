@@ -516,19 +516,32 @@
       <ul>
         <li><span class="chip chip-need">do</span> <strong>Sweep the dwell duration.</strong> §5 predicts no setting escapes the trade-off. If one does, the necessity claim is wrong and the paper changes. This is the single most important remaining experiment.</li>
         <li><span class="chip chip-need">do</span> <strong>Formal model and check</strong> for the safety and termination properties.</li>
-        <li><span class="chip chip-need">do</span> <strong>Export reef bathymetry from the logs.</strong> The playback tool already rasterises every DVL, altimeter and sonar return into a 2.5-D height map, keeping the shallowest depth per cell. The simulator has an OBJ/heightmap exporter; the playback server does not expose one. Closing that gap turns recorded reef slopes into a terrain function and makes tier 2 below possible — a small piece of work for the largest gain in the paper.</li>
+        <li><span class="chip chip-need">do</span> <strong>Fly the reef mesh in simulation.</strong> Load the Metashape reconstructions and re-run the controller comparison on them. Needs ray–triangle intersection in the three sensor simulators rather than the current height-field test, for the reason given below. Largest gain in the paper per hour spent.</li>
+        <li><span class="chip chip-need">do</span> <strong>Reconstruction coverage check.</strong> Confirm the mesh is dense where the counterfactual trajectories would fly, not only where the earlier controller went.</li>
         <li><span class="chip chip-need">do</span> <strong>A cliff regression case that validates rather than detects.</strong> The current one is degenerate: past the step the vehicle sits below the surface and the caster hits on every beam.</li>
       </ul>
       <h3>Three tiers of evidence, and what each may claim</h3>
       <p>The field data is extensive and from genuinely complex reef slopes, but the vehicle flew a different and much simpler avoidance method at the time. That constrains what replay can support, and the constraint should be stated before a reviewer states it.</p>
       <ul>
         <li><strong>Tier 1 — closed loop, synthetic terrain.</strong> <span class="chip chip-have">have</span> The parameterised sawtooth: controlled, repeatable, sweepable, and the only tier where the controllers can be made to differ under identical conditions. It cannot speak to real structure.</li>
-        <li><strong>Tier 2 — closed loop, reconstructed reef bathymetry.</strong> <span class="chip chip-need">do</span> Export the height map built from the logs, load it as the simulator's terrain function, re-run the comparison. Real geometry and real rugosity with closed-loop numbers. This is the strongest evidence available without a new campaign, and the tooling is most of the way there.</li>
+        <li><strong>Tier 2 — closed loop on the photogrammetric reef mesh.</strong> <span class="chip chip-need">do</span> Dense, metrically accurate Metashape reconstructions from the vehicle's own stereo imagery, flown as missions in simulation. Real rugosity at the scale the vehicle actually cares about, and repeatable across controllers — which the real vehicle can never provide. This is far stronger than a height map rasterised from sonar returns, and it is the tier that carries the paper.</li>
         <li><strong>Tier 3 — open-loop replay, recorded sensor streams.</strong> <span class="chip chip-have">have</span> The algorithm consuming real DVL, altimeter and sonar returns along the real trajectory. Demonstrates the perception stack on real reef data, produces interpretable mode traces against real bathymetry, and supports a per-cycle counterfactual: given this recorded state, what would the controller have commanded, and how does that differ from what flew.</li>
       </ul>
       <div class="claim">
         <p>Replay is open loop. The vehicle followed the earlier controller, so the recorded trajectory is not the one this controller would have flown, and the map depends on where the vehicle went. A claim about a single cycle — <em>given this state, it would have commanded a climb</em> — is sound. A claim about a trajectory — <em>it would have avoided this</em> — is not, beyond the horizon over which the two controllers agree. Quantify that horizon and report it rather than letting a reviewer ask.</p>
       </div>
+      <h3>Height field or mesh — this decides whether the overhang claim is testable</h3>
+      <p>The simulator's sensors march a ray and test it against <code>terrain_fn(x, y)</code>, a height field. Sampling the mesh into one is a few lines and works immediately, but a height field is built by keeping the topmost surface per cell — <em>the same upper-envelope convention the manifold uses</em>. Sensors that cannot see beneath an overhang, feeding a representation that cannot express one, would agree by construction. Any overhang result from that setup is circular, and a reviewer who notices will discount the section.</p>
+      <p>Ray–triangle intersection against the mesh removes the circularity: a beam can return the underside of an overhang, the map must then decide what to do with it, and §3's claim — that the planner commands over structure and never under it — becomes a measurement rather than a restatement of the assumption. That is the version worth building, and it is confined to the three <code>_simulate_*</code> methods.</p>
+
+      <h3>What mesh simulation still is not</h3>
+      <ul>
+        <li><strong>Simulated acoustics.</strong> Ray-cast returns have none of the multipath, dropout structure or beam-quality variation of a real DVL, and the sonar noise model is plain Gaussian. The sensor gating this system depends on is exercised far more honestly by tier 3.</li>
+        <li><strong>Perfect navigation.</strong> No INS or DVL drift, where the real mission accumulates it and the map degrades accordingly.</li>
+        <li><strong>Reconstruction coverage is not neutral.</strong> The mesh comes from imagery the vehicle collected while flying the earlier controller, so it is densest where that controller went — and potentially thin exactly where this one would fly differently, such as closer over crests the old method stood off from. Check coverage against the counterfactual trajectories rather than assuming it.</li>
+      </ul>
+      <p>None of these are reasons not to do it; they are the sentences that keep the section credible, and they are why tiers 2 and 3 are complementary rather than redundant. Tier 2 gives closed-loop numbers on real geometry; tier 3 gives real sensing with real failure modes. Neither alone is field validation, and the paper is stronger for saying which is which.</p>
+
       <p>The weak method that actually flew is an asset rather than an embarrassment: it is a real-world baseline with a real outcome. Where it lost altitude or closed on terrain, the per-cycle counterfactual shows what this controller would have commanded at that same state — which is exactly the defensible form of the claim, and more persuasive on real reef slopes than any synthetic scenario.</p>
 
       <h3>Disclose</h3>
@@ -635,12 +648,12 @@
           <tr><td>Dwell sweep bounding the claim</td>
               <td><span class="chip chip-need">not run</span></td>
               <td>Required either way — without it "necessary" is unbounded</td></tr>
-          <tr><td>Reef-slope field data</td>
+          <tr><td>Reef-slope logs + photogrammetric meshes</td>
               <td><span class="chip chip-have">recorded</span></td>
-              <td>Extensive, complex terrain — but flown under a different, simpler controller</td></tr>
-          <tr><td>Closed-loop runs on reconstructed reef terrain</td>
+              <td>Extensive and metrically accurate — but flown under a different, simpler controller</td></tr>
+          <tr><td>Closed-loop missions on the reef mesh</td>
               <td><span class="chip chip-need">not run</span></td>
-              <td>The decisive one, and reachable from the data in hand. See §8</td></tr>
+              <td>The decisive one, and reachable from data in hand. See §8</td></tr>
           <tr><td>Formal safety/termination proof</td>
               <td><span class="chip chip-need">not run</span></td>
               <td>Would be a substantial addition; large effort</td></tr>
@@ -651,7 +664,7 @@
     <div class="body">
       <p><strong>Two rows must move before submission.</strong> The dwell sweep is not optional: without it the contention claim is unbounded and a reviewer will say so in one line. And the reef data must be converted from recorded logs into closed-loop results on reconstructed bathymetry — which is an analysis pass on data already held, not a new campaign. Everything else in the table is either done or explicitly deferred.</p>
       <div class="claim">
-        <p>Eight pages is enough for three ordered contributions — contention, representation, deployed system evaluated on real reef terrain — but only if the third is real. Closed-loop results on bathymetry reconstructed from the logs, plus open-loop mode traces on the recorded sensor streams, is what separates this from a simulation paper. Be explicit that the replay is open loop; the paper is stronger for saying so than for being caught not saying it.</p>
+        <p>Eight pages is enough for three ordered contributions — contention, representation, deployed system evaluated on real reef terrain — but only if the third is real. Closed-loop missions over the photogrammetric reef mesh, plus open-loop mode traces on the recorded sensor streams, is what separates this from a simulation paper. Name both for what they are: neither is a closed-loop field trial, and the paper is stronger for saying so than for being caught not saying it.</p>
       </div>
       <p><strong>This closes the JOE path for this work.</strong> RA-L is itself a journal, so a later JOE paper on the same material would be a journal-to-journal extension rather than the usual conference-to-journal route, and would need substantial genuinely new content. The conference option supplies the talk without spending a second venue.</p>
       <p>If the work grows past eight pages rather than fitting, the clean split is by subject and not by increment: the contention result stays at RA-L, and the representation plus an extended field campaign becomes a separate marine-venue paper on surveying rugose reef terrain under sparse sensing. Two papers that do not overlap, rather than one published twice.</p>

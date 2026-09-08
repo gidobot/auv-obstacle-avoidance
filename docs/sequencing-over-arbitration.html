@@ -282,10 +282,11 @@
   <header class="mast">
     <p class="eyebrow">Publication positioning · draft outline</p>
     <h1>Sequencing Over Arbitration</h1>
-    <p class="standfirst">Surveying steep terrain at a fixed imaging altitude needs two things at once — commitment through a manoeuvre, and the sequencing of translation against vertical acquisition. A priority hierarchy has a single arbitration channel to express both through, so they compete. Separating them is what the deployed supervisory design buys, and it is measurable. Underneath sits a second contribution: a 2-D manifold representation that makes five sensor rays per cycle enough to plan on.</p>
+    <p class="standfirst">Surveying rugose reef terrain at a fixed imaging altitude needs two things at once — commitment through a manoeuvre, and the sequencing of translation against vertical acquisition. A priority hierarchy has a single arbitration channel to express both through, so they compete. Separating them is what the deployed supervisory design buys, and it is measurable. Underneath sits a 2-D manifold representation that makes five sensor rays per cycle enough to plan on over reef terrain.</p>
     <div class="meta">
       <span><b>Platform</b> ACFR seafloor-imaging AUV</span>
       <span><b>Implementation</b> auv_oavoid / oa-mapper</span>
+      <span><b>Target</b> RA-L with conference option</span>
       <span><b>Status</b> results in hand, pre-submission</span>
     </div>
   </header>
@@ -295,19 +296,21 @@
     <div class="body">
       <p>An earlier version of this outline argued commitment under lost observability as the thesis. The experiments do not support that framing: commitment alone changes almost nothing, and once the planner's vehicle-column command was corrected, no controller collides from losing sight of an obstacle. The evidence supports a different and sharper claim.</p>
       <div class="claim">
-        <p>Holding a survey altitude over steep terrain requires <em>temporal sequencing</em> — halting translation until the vertical task has converged, then advancing — and requires <em>commitment</em> through a manoeuvre for safety. Task-priority control can be given either, but expresses both through the same channel: which task is currently active. Holding a set-based task active for commitment directly consumes the time the altitude task needs to converge. The two contend. A supervisory structure separates them, and only the separated design achieves both.</p>
+        <p>Holding a survey altitude over rugose terrain requires <em>temporal sequencing</em> — halting translation until the vertical task has converged, then advancing — and requires <em>commitment</em> through a manoeuvre for safety. Task-priority control can be given either, but expresses both through the same channel: which task is currently active. Holding a set-based task active for commitment directly consumes the time the altitude task needs to converge. The two contend. A supervisory structure separates them, and only the separated design achieves both.</p>
       </div>
       <p>The contribution is therefore not "a state machine for AUV altitude control", which is well-trodden. It is the identification of two requirements that a single priority hierarchy cannot satisfy simultaneously, demonstrated by building the hierarchy, adding each mechanism, and measuring where it fails.</p>
-      <p>A second contribution is independent of that argument and would stand even if the control comparison went the other way: the vehicle-relative 2-D manifold is what makes planning possible under this platform's sensing budget at all, and it is cheap enough to run inside the vehicle's own node. §3.</p>
+      <p>The vehicle-relative 2-D manifold underpins this: it is what makes planning possible under the platform's sensing budget at all, and it is cheap enough to run inside the vehicle's own node. At RA-L length it is supporting method rather than a co-equal claim — see §3 and the structure note in §9.</p>
     </div>
   </section>
 
   <section>
     <div class="sec-head"><span class="num">02</span><h2>Why the survey is hard</h2></div>
     <div class="body">
-      <p>The vehicle images the seabed from a fixed altitude, which puts it close enough to terrain that a cliff is a collision risk rather than a mapping nuisance. Two properties of the platform drive everything that follows.</p>
-      <p><strong>The obstacle stops being observable mid-manoeuvre.</strong> Downward Janus beams and the altimeter cannot see a feature above the vehicle, and the forward sonar's return is lost during the climb. Yet tail clearance requires the manoeuvre to continue past a crest the vehicle can no longer sense.</p>
-      <p><strong>Altitude cannot be tracked while advancing.</strong> On a steep face the seabed changes faster than the depth rate can follow, so a vehicle that keeps surging never settles onto the imaging altitude at all.</p>
+      <p>The motivating environment is highly rugose reef terrain — coral reef slopes, where vertical profiles, canyons, overhangs, bommies and pervasive small-scale structural variability sit within the survey corridor. Flying at a fixed imaging altitude puts the vehicle inside that structure rather than safely above it, so terrain is a collision hazard rather than a mapping nuisance, and the hazards are not isolated features to be avoided one at a time but a continuous property of the seabed.</p>
+      <p>That environment drives everything that follows, through three properties.</p>
+      <p><strong>Structure is dense and local.</strong> Relief varies on scales comparable to the vehicle itself, so the seabed under the hull is not well described by the reading directly beneath it, and commanded depth derived from a single nadir altitude will put one end of the vehicle into terrain the other end never saw.</p>
+      <p><strong>The obstacle stops being observable mid-manoeuvre.</strong> Downward Janus beams and the altimeter cannot see a feature above the vehicle, and the forward sonar's return is lost during a climb. Yet tail clearance requires the manoeuvre to continue past a crest the vehicle can no longer sense.</p>
+      <p><strong>Altitude cannot be tracked while advancing.</strong> Where relief is steep the seabed changes faster than the depth rate can follow, so a vehicle that keeps surging never settles onto the imaging altitude at all.</p>
     </div>
 
     <figure>
@@ -390,15 +393,17 @@
         <div class="param"><dt>after a 180° turn</dt><dd>13.3 <span>%</span></dd></div>
       </div>
       <p>Columns without a real observation are flagged rather than guessed at, so the avoidance checks skip them instead of triggering on the grid-floor default — the representation carries its own uncertainty rather than pretending to completeness. The 13.3% figure is the post-turn low, when the heading gate has invalidated the map and it is rebuilding; that recovery window is where the planner's rule of commanding the vehicle column from the most conservative source available — the shallowest manifold across the hull footprint, or the latest direct altitude return if shallower — earns its place.</p>
-      <p>The limitation is the same fact stated from the other side: the projection is valid only while heading is roughly constant, and overhangs cannot be expressed by an upper envelope at all. Both belong in §10, not buried.</p>
+      <p>Overhangs deserve their own sentence, because they are named among the reef hazards and an upper envelope cannot represent them. What it does instead is take the shallowest occupied voxel in each column, so an overhang's underside <em>becomes</em> the manifold and the vehicle is commanded above it: the planner always goes over structure, never under it. That is the conservative failure mode, and for a downward-imaging survey it is arguably the correct one — the cost is coverage beneath the overhang, not safety. Worth claiming as a property rather than conceding as a gap.</p>
+      <p>The genuine limitation is the projection itself: it is valid only while heading is roughly constant. That belongs in §10, not buried.</p>
     </div>
   </section>
 
   <section>
     <div class="sec-head"><span class="num">04</span><h2>The experiment</h2></div>
     <div class="body">
-      <p>A 4-leg lawnmower flown across a 70° sawtooth ridge field — 20 m teeth on a 30 m seafloor with 10 m flats — with legs along the axis the teeth progress on, so each 40 m leg crosses roughly two and a third crests. The vehicle launches at the surface; the descent is excluded. Each leg transition is two 90° on-the-spot yaws, which exceed the stale-heading gate and invalidate the map.</p>
+      <p>The test terrain is a parameterised proxy for reef rugosity rather than a reef itself: a repeatable, tunable worst case that isolates the control question. A 4-leg lawnmower flown across a 70° sawtooth ridge field — 20 m teeth on a 30 m seafloor with 10 m flats — with legs along the axis the teeth progress on, so each 40 m leg crosses roughly two and a third crests. The vehicle launches at the surface; the descent is excluded. Each leg transition is two 90° on-the-spot yaws, which exceed the stale-heading gate and invalidate the map.</p>
       <p>All controllers <strong>share the deployed perception stack</strong> — the same occupancy grid, the same cliff manifold, the same measurements. Only the arbitration differs, so any difference measured is a property of the control law. Each condition is 15 noise realisations, the same seeds across controllers.</p>
+      <p>The simulator also carries a procedural reef generator — bommies, terraces, cliff-like faults — which is the more representative scenario and is listed in §8 as outstanding. The sawtooth is what the current numbers come from, and the paper should say so plainly.</p>
       <p>The figure of merit is time held at imaging altitude, not ground covered: halting to reach altitude before moving on is correct behaviour for this survey, so scoring coverage would penalise the right answer.</p>
     </div>
 
@@ -525,44 +530,45 @@
 
   <section>
     <div class="sec-head"><span class="num">09</span><h2>Proposed structure</h2></div>
+    <div class="body">
+      <p>This is the RA-L cut. Six pages plus an optional seventh will not carry three co-equal contributions, so one claim leads and the rest becomes supporting method. At JOE length none of these cuts apply — see §11 for which venue the work actually warrants.</p>
+    </div>
     <ol class="outline">
       <li><span class="o-num">I</span><div>
         <p class="o-title">Introduction</p>
-        <p class="o-note">Fixed-altitude imaging puts the vehicle inside the collision envelope. State both requirements — sequencing and commitment — in the first column.</p>
+        <p class="o-note">Reef-slope survey at fixed imaging altitude; rugosity as a continuous hazard rather than isolated obstacles. State the contention result as <em>the</em> contribution in the first column, with a three-line contribution list.</p>
       </div></li>
       <li><span class="o-num">II</span><div>
         <p class="o-title">Related work</p>
-        <p class="o-note">Task-priority and null-space methods in marine robotics; set-based tasks; behavioural and reactive avoidance; occupancy and elevation mapping underwater. Position against arbitration, not against mapping.</p>
+        <p class="o-note">Task-priority and null-space control in marine robotics, set-based tasks, reactive avoidance, underwater occupancy/elevation mapping. Tight — half a column at RA-L length.</p>
       </div></li>
       <li><span class="o-num">III</span><div>
-        <p class="o-title">Problem formulation</p>
-        <p class="o-note">Vehicle and sensor model; the observability gap; the tail-clearance constraint; the depth-rate limit against terrain gradient that makes tracking-while-advancing infeasible.</p>
+        <p class="o-title">Method: representation and controller</p>
+        <p class="o-note">One section, not two. The manifold as the enabling choice for sparse sensing, compressed to a figure and the cell/memory/timing numbers; then the mode set, priority order and the latch, with the separation of commitment from sequencing made explicit. This is where the page pressure bites.</p>
       </div></li>
       <li><span class="o-num">IV</span><div>
-        <p class="o-title">Representation: the cliff manifold</p>
-        <p class="o-note">Vehicle-relative 2-D grid, upper-envelope extraction, forward extension, heading-staleness as an explicit model of validity under rotation, and observed-versus-inferred columns flagged rather than guessed. Argue it as the enabling choice for sparse sensing and carry the numbers: 60× fewer cells than the equivalent volume, 21 µs per pipeline pass, 78% of columns observed from five rays per cycle.</p>
+        <p class="o-title">Baseline construction</p>
+        <p class="o-note">The set-based task-priority controller, its reduction to strict priority in one DOF, and the two additions. Short, but do not cut it — it is what makes the comparison credible rather than a straw man.</p>
       </div></li>
       <li><span class="o-num">V</span><div>
-        <p class="o-title">Supervisory controller</p>
-        <p class="o-note">Mode set, priority order, the latch with its monotone ratchets, release conditions — presented as a hybrid automaton, with the separation of commitment from sequencing made explicit.</p>
+        <p class="o-title">Results</p>
+        <p class="o-note">The five-controller table, the contention mechanism, the dwell sweep, and field results. Headline: sequencing carries the mission, commitment carries safety, one channel cannot carry both.</p>
       </div></li>
       <li><span class="o-num">VI</span><div>
-        <p class="o-title">Baseline construction</p>
-        <p class="o-note">The set-based task-priority controller, its reduction to strict priority in one DOF, and the two additions. This section is why the comparison is credible rather than a straw man.</p>
-      </div></li>
-      <li><span class="o-num">VII</span><div>
-        <p class="o-title">Results</p>
-        <p class="o-note">The table of §4, the contention mechanism of §5, the dwell sweep, and field results. Headline: sequencing carries the mission, commitment carries safety, one channel cannot carry both.</p>
-      </div></li>
-      <li><span class="o-num">VIII</span><div>
-        <p class="o-title">Deployment properties</p>
-        <p class="o-note">Threshold tuning versus priority weighting; verifiability of a finite mode set; the single version-pinned artifact shared by vehicle, simulator and replay.</p>
-      </div></li>
-      <li><span class="o-num">IX</span><div>
-        <p class="o-title">Limitations and conclusion</p>
-        <p class="o-note">See §10.</p>
+        <p class="o-title">Discussion and conclusion</p>
+        <p class="o-note">Threshold tuning versus priority weighting, the terrain-imposed ceiling, and limitations. Compress §6 to a paragraph here.</p>
       </div></li>
     </ol>
+    <div class="body">
+      <h3>What moves out</h3>
+      <ul>
+        <li><strong>Formal verification</strong> of the safety and termination properties. Too much for six pages, and it deserves its own treatment. Cite as future work or hold for the extended version.</li>
+        <li><strong>The full deployment-properties argument.</strong> One paragraph in Discussion, not a section.</li>
+        <li><strong>The representation as a co-equal claim.</strong> It becomes method. If it will not compress, it is a separate paper — it would stand on its own for a marine venue.</li>
+      </ul>
+      <h3>Use the video</h3>
+      <p>RA-L takes a supplementary video and reviewers watch them. The repository already has a browser visualizer that renders the grid, manifold, commanded-depth profile and mode against terrain in real time. A side-by-side of the deployed controller and the task-priority baseline crossing the same crest would carry the contention argument in fifteen seconds better than any figure — and it costs a screen recording, not new work.</p>
+    </div>
   </section>
 
   <section>
@@ -571,7 +577,7 @@
       <ul>
         <li><strong>The map assumes locally straight transects.</strong> Collapsing 3-D structure into a vehicle-relative vertical slice is valid only while heading is roughly constant; the 45° staleness gate is an admission of this and should be presented as a scope condition of the representation, not a tuning knob.</li>
         <li><strong>Single degree of freedom.</strong> The controller commands depth. It goes over, never around — and this is where task priority genuinely wins, since it absorbs additional DOF where the mode set would need redesign.</li>
-        <li><strong>Terrain class.</strong> Guarantees hold for terrain the sensors resolve; overhangs are outside an upper-envelope representation entirely.</li>
+        <li><strong>Overhangs are flown over, not under.</strong> The upper envelope cannot represent them, and treats the underside as the surface. Safe, but no imagery is acquired beneath an overhang and altitude there is measured from the wrong surface. State it as a coverage bound on the method, since reef slopes genuinely contain them.</li>
         <li><strong>One terminal state.</strong> Slopes too steep to traverse, as in §7.</li>
         <li><strong>The test terrain is near the edge of feasibility.</strong> A 70° 20 m sawtooth permits at most ~19% time-on-altitude at 0.5 m/s, since each tooth costs about 72 s of vertical transit against 35 s of along-track. The deployed controller reaches ~40% of that ceiling. Report the ceiling alongside the result, or the absolute numbers will read as failure.</li>
       </ul>
@@ -581,7 +587,49 @@
   <section>
     <div class="sec-head"><span class="num">11</span><h2>Venue and anchors</h2></div>
     <div class="body">
-      <p>With field results leading, <em>Journal of Field Robotics</em> or <em>IEEE Journal of Oceanic Engineering</em>. With the dwell sweep and formal check landed, IROS or ICRA — the contention result is the kind of finding a controls audience will engage with, provided the baseline is credible and the necessity claim is bounded.</p>
+      <p>The question is not which venue would accept this, but which one the contributions currently warrant. An honest inventory:</p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Candidate contribution</th><th>State</th><th>Weight</th></tr></thead>
+        <tbody>
+          <tr><td>Sequencing/commitment contention</td>
+              <td><span class="chip chip-have">measured</span></td>
+              <td>Novel, falsifiable, carries a paper on its own</td></tr>
+          <tr><td>2-D manifold under sparse sensing</td>
+              <td><span class="chip chip-have">measured</span></td>
+              <td>Solid engineering with numbers; a design choice rather than a new algorithm</td></tr>
+          <tr><td>Threshold tuning vs priority weights</td>
+              <td><span class="chip chip-have">argued</span></td>
+              <td>Real for practitioners; discussion material, not a standalone claim</td></tr>
+          <tr><td>Dwell sweep bounding the claim</td>
+              <td><span class="chip chip-need">not run</span></td>
+              <td>Required either way — without it "necessary" is unbounded</td></tr>
+          <tr><td>Field results on reef terrain</td>
+              <td><span class="chip chip-need">not run</span></td>
+              <td>The decisive one. See below</td></tr>
+          <tr><td>Formal safety/termination proof</td>
+              <td><span class="chip chip-need">not run</span></td>
+              <td>Would be a substantial addition; large effort</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="body">
+      <p><strong>As it stands, this is RA-L-sized.</strong> One crisp finding, a credible baseline, a measured mechanism — which is what the format rewards. Two contributions plus a practitioner argument is not a full journal paper, and padding it into one would show.</p>
+      <p><strong>Field data is what converts it.</strong> A JOE paper on reef-slope survey avoidance without in-water results would be weak whatever else it contained; with them it is strong, and the remaining material — the representation at full length, the formal properties, the deployment argument, reef-terrain comparisons — then fills a journal naturally rather than by inflation. The logs and the replay apparatus already exist, so this is a campaign and an analysis pass, not new method.</p>
+      <div class="claim">
+        <p>The decision reduces to one question: does a reef-slope field campaign happen before you want this published? If yes, aim at JOE and skip RA-L. If no, take RA-L now with the contention result.</p>
+      </div>
+      <p><strong>Do not plan on both.</strong> RA-L is itself a journal, so a later JOE paper on the same work is a journal-to-journal extension rather than the usual conference-to-journal path, and needs substantial genuinely new content to be defensible. The conference option on RA-L gives the talk without spending a second venue.</p>
+      <p>If the split happens anyway, the clean line is by subject rather than by increment: the contention result to RA-L, and the representation plus field validation as a separate marine-venue paper on surveying rugose reef terrain under sparse sensing. Two papers that do not overlap, rather than one paper published twice.</p>
+      <h3>Format notes</h3>
+      <ul>
+        <li>RA-L review is fast but unforgiving of overclaiming. Prefer "a single priority hierarchy cannot supply both without trading one against the other, across the range we swept" to "the mode structure is necessary".</li>
+        <li>RA-L takes a supplementary video and reviewers watch them — see §9.</li>
+        <li>JOE expects the deployment detail this work actually has: the version-pinned artifact shared by vehicle, simulator and replay is the kind of thing that journal's readership values and a letters format has no room for.</li>
+      </ul>
       <h3>Literature anchors to verify and position against</h3>
       <ul class="refs">
         <li>Siciliano &amp; Slotine, <cite>A general framework for managing multiple tasks in highly redundant robotic systems</cite> — the task-priority formulation itself.</li>

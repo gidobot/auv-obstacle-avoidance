@@ -633,6 +633,8 @@ class OccupancyMap:
         c = self.cfg
         for i in range(len(ranges)):
             r_max = ranges[i]
+            if not np.isfinite(r_max):
+                continue
             ang = beam_angles[i]
             is_hit = (hit_surface is None) or bool(hit_surface[i])
             allow_clear = (can_clear is None) or bool(can_clear[i])
@@ -706,6 +708,8 @@ class OccupancyMap:
             range_step:       Ray-march step size (m).
             vehicle_heading:  Vehicle heading (rad) for voxel metadata.
         """
+        if not np.isfinite(range_m):
+            return
         c = self.cfg
         r = range_step
         while r < range_m - range_step:
@@ -754,6 +758,8 @@ class OccupancyMap:
             range_step: Step size for ray marching (m).
             angle_steps: Number of angular samples across the beam.
         """
+        if not np.isfinite(sonar_range):
+            return
         c = self.cfg
         if vehicle_depth < c.sonar_min_depth_m:
             return
@@ -1678,6 +1684,16 @@ class ObstacleMapper:
             return
         dn = pose.north - self._last_pose.north
         de = pose.east - self._last_pose.east
+
+        # Detect mission restart / teleport: if the straight-line jump exceeds
+        # the grid length the vehicle is outside the mapped area.  Reset rather
+        # than projecting a huge (and mis-signed) ds onto the arc-local axis.
+        grid_len = (self._omap.nx - 1) * self._omap.cfg.dx
+        if dn * dn + de * de > grid_len * grid_len:
+            self._omap.reset(0.0, pose.depth)
+            self._last_pose = pose
+            return
+
         h = self._last_pose.heading
         ds = dn * np.cos(h) + de * np.sin(h)
         if ds > 0.0:

@@ -233,6 +233,7 @@ void OccupancyMap::update_dvl_ray(
 
     for (int i = 0; i < n; ++i) {
         double r_max     = ranges[i];
+        if (!std::isfinite(r_max)) continue;
         double ang       = beam_angles[i];
         bool   is_hit    = !hit_surface.has_value() || (*hit_surface)[i];
         bool   allow_clear = !can_clear.has_value() || (*can_clear)[i];
@@ -290,6 +291,7 @@ void OccupancyMap::update_altimeter_ray(
     double range_step,
     double vehicle_heading)
 {
+    if (!std::isfinite(range_m)) return;
     const auto& c = cfg_;
 
     // Ray-march free cells vertically
@@ -325,6 +327,7 @@ void OccupancyMap::update_sonar(
     int    angle_steps,
     double vehicle_heading)
 {
+    if (!std::isfinite(sonar_range)) return;
     const auto& c = cfg_;
     if (vehicle_depth < c.sonar_min_depth_m) return;
 
@@ -927,6 +930,17 @@ void ObstacleMapper::advance_to_pose(const Pose& pose) {
     }
     double dn = pose.north - last_pose_->north;
     double de = pose.east  - last_pose_->east;
+
+    // Detect mission restart / teleport: if the straight-line jump exceeds the
+    // grid length the vehicle is outside the mapped area.  Reset rather than
+    // projecting a huge (and mis-signed) ds onto the arc-local axis.
+    double grid_len = (omap_.nx() - 1) * omap_.cfg().dx;
+    if (dn*dn + de*de > grid_len * grid_len) {
+        omap_.reset(0.0, pose.depth);
+        last_pose_ = pose;
+        return;
+    }
+
     double h  = last_pose_->heading;
     double ds = dn * std::cos(h) + de * std::sin(h);
     if (ds > 0.0) omap_.advance(ds);

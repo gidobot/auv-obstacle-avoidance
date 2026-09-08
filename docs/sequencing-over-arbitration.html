@@ -291,13 +291,12 @@
   a:focus-visible, :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
-
 <div class="wrap">
 
   <header class="mast">
-    <p class="eyebrow">Publication positioning · draft outline</p>
+    <p class="eyebrow">Publication positioning · rewritten against the current implementation</p>
     <h1>Sequencing Over Arbitration</h1>
-    <p class="standfirst">Surveying rugose reef terrain at a fixed imaging altitude needs two things at once — commitment through a manoeuvre, and the sequencing of translation against vertical acquisition. A priority hierarchy has a single arbitration channel to express both through, so they compete. Separating them is what the deployed supervisory design buys, and it is measurable. Underneath sits a 2-D manifold representation that makes five sensor rays per cycle enough to plan on over reef terrain.</p>
+    <p class="standfirst">A supervisory mode structure buys two things a single task-priority hierarchy cannot. It can hold commitment and sequencing at once, because they live in separate mechanisms rather than contending for one arbitration channel. And it admits a liveness guarantee — no cycle of states without forward progress — that a priority hierarchy has no way even to state. Both are measured on a deployed AUV controller for rugose reef survey.</p>
     <div class="meta">
       <span><b>Platform</b> ACFR seafloor-imaging AUV</span>
       <span><b>Implementation</b> auv_oavoid / oa-mapper</span>
@@ -307,27 +306,27 @@
   </header>
 
   <section>
-    <div class="sec-head"><span class="num">01</span><h2>The claim</h2></div>
+    <div class="sec-head"><span class="num">01</span><h2>The claim, in two legs</h2></div>
     <div class="body">
-      <p>An earlier version of this outline argued commitment under lost observability as the thesis. The experiments do not support that framing: commitment alone changes almost nothing, and once the planner's vehicle-column command was corrected, no controller collides from losing sight of an obstacle. The evidence supports a different and sharper claim.</p>
+      <p>An earlier version of this document argued commitment under lost observability as the thesis. The experiments did not support it: commitment alone moves the mission metric by a tenth of a percentage point, and once the planner's vehicle-column rule was corrected, nothing collides from losing sight of an obstacle. What the work does support is narrower, sharper, and has two halves that share one cause.</p>
       <div class="claim">
-        <p>Holding a survey altitude over rugose terrain requires <em>temporal sequencing</em> — halting translation until the vertical task has converged, then advancing — and requires <em>commitment</em> through a manoeuvre for safety. Task-priority control can be given either, but expresses both through the same channel: which task is currently active. Holding a set-based task active for commitment directly consumes the time the altitude task needs to converge. The two contend. A supervisory structure separates them, and only the separated design achieves both.</p>
+        <p><strong>One.</strong> Holding survey altitude over rugose terrain requires <em>temporal sequencing</em> — halting translation until the vertical task converges — and requires <em>commitment</em> through a manoeuvre. Task priority can be given either, but expresses both through the same channel: which task is currently active. Holding a task active for commitment consumes the very cycles the altitude task needs to converge. They contend.</p>
+        <p style="margin-top:0.7rem"><strong>Two.</strong> Because the supervisory structure separates them, its mode graph can be reasoned about directly. It carries a liveness property — the states that command zero forward speed cannot form a cycle — which is provable by construction and which a priority hierarchy, resolving velocities instant by instant, cannot express as a property at all.</p>
       </div>
-      <p>The contribution is therefore not "a state machine for AUV altitude control", which is well-trodden. It is the identification of two requirements that a single priority hierarchy cannot satisfy simultaneously, demonstrated by building the hierarchy, adding each mechanism, and measuring where it fails.</p>
-      <p>At eight pages three contributions fit, provided they are ordered rather than balanced. The contention result leads. The vehicle-relative 2-D manifold is the second — it is what makes planning possible under the platform's sensing budget at all, and it is cheap enough to run inside the vehicle's own node (§3). The third is the deployed system itself: one version-pinned core flying on the vehicle, driving the simulator, and replaying field logs, with in-water validation on reef terrain.</p>
+      <p>Both legs point at the same thing: a hierarchy has one channel, and one channel cannot both carry two mechanisms and be reasoned about as a discrete structure. That is the contribution. The 2-D manifold underneath it is the enabling substrate (§3), and the deployed system is the evidence (§8).</p>
+      <p>Ordered for eight pages: contention leads, liveness follows as the guarantee it unlocks, the representation is method, the deployment is evaluation.</p>
     </div>
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">02</span><h2>Why the survey is hard</h2></div>
+    <div class="sec-head"><span class="num">02</span><h2>The environment</h2></div>
     <div class="body">
-      <p>The motivating environment is highly rugose reef terrain — coral reef slopes, where vertical profiles, canyons, overhangs, bommies and pervasive small-scale structural variability sit within the survey corridor. Flying at a fixed imaging altitude puts the vehicle inside that structure rather than safely above it, so terrain is a collision hazard rather than a mapping nuisance, and the hazards are not isolated features to be avoided one at a time but a continuous property of the seabed.</p>
-      <p>That environment drives everything that follows, through three properties.</p>
-      <p><strong>Structure is dense and local.</strong> Relief varies on scales comparable to the vehicle itself, so the seabed under the hull is not well described by the reading directly beneath it, and commanded depth derived from a single nadir altitude will put one end of the vehicle into terrain the other end never saw.</p>
-      <p><strong>The obstacle stops being observable mid-manoeuvre.</strong> Downward Janus beams and the altimeter cannot see a feature above the vehicle, and the forward sonar's return is lost during a climb. Yet tail clearance requires the manoeuvre to continue past a crest the vehicle can no longer sense.</p>
+      <p>Coral reef slopes, where vertical profiles, canyons, overhangs, bommies and pervasive small-scale variability sit inside the survey corridor. Imaging from a fixed altitude puts the vehicle within that structure rather than safely above it, so terrain is a collision hazard rather than a mapping nuisance — and the hazards are a continuous property of the seabed, not isolated features to be routed around one at a time.</p>
+      <p>Three consequences drive everything that follows.</p>
+      <p><strong>Structure is dense and local.</strong> Relief varies on scales comparable to the vehicle, so the seabed beneath the hull is not described by the reading directly under it. A command derived from a single nadir altitude puts one end of the vehicle into terrain the other end never saw.</p>
+      <p><strong>The obstacle stops being observable mid-manoeuvre.</strong> Downward Janus beams and the altimeter cannot see a feature above the vehicle, and the forward sonar's return is lost during a climb — yet tail clearance requires the manoeuvre to continue past a crest the vehicle can no longer sense.</p>
       <p><strong>Altitude cannot be tracked while advancing.</strong> Where relief is steep the seabed changes faster than the depth rate can follow, so a vehicle that keeps surging never settles onto the imaging altitude at all.</p>
     </div>
-
     <figure>
       <div class="fig-frame">
         <svg viewBox="0 0 760 320" role="img" aria-label="Depth profile of a cliff traverse showing the commit point, the region where the crest is no longer observable, and the release point after tail clearance.">
@@ -377,14 +376,12 @@
         <b>Figure 1 · the manoeuvre</b><br>
         Between commit and release the vehicle executes a manoeuvre whose justification has left the sensor field. Commitment is what forbids abandoning it. Separately — and this is the part the experiments show matters more — the vehicle must stop surging to climb at all, because on a face this steep the terrain outruns the depth rate.
       </figcaption>
-    </figure>
-  </section>
+    </figure>  </section>
 
   <section>
-    <div class="sec-head"><span class="num">03</span><h2>The representation earns its own claim</h2></div>
+    <div class="sec-head"><span class="num">03</span><h2>The representation makes sparse sensing sufficient</h2></div>
     <div class="body">
-      <p>Before the control argument there is a representation argument, and it stands on its own. A seafloor survey AUV senses the world through five rays per cycle — three Janus beams, an altimeter, a forward sonar. That is far too sparse to populate a volumetric map: at 8 Hz it would take roughly four hours of ray endpoints merely to touch each cell of the equivalent 3-D grid once, by which time the vehicle has long since moved on.</p>
-      <p>Collapsing occupancy onto the vehicle-relative vertical plane, and reducing that to the upper-envelope polyline the planner actually consumes, is what makes sparse sensing sufficient. Every return lands in the plane the survey is flown in.</p>
+      <p>The platform senses through five rays per cycle — three Janus beams, an altimeter, a forward sonar. That is far too sparse to fill a volume: at 8 Hz it would take roughly four hours of ray endpoints merely to touch each cell of the equivalent 3-D grid once, by which time the vehicle is long gone. Collapsing occupancy onto the vehicle-relative vertical plane, and reducing that to the upper-envelope polyline the planner consumes, is what makes the sensing budget sufficient. Every return lands in the plane the survey is flown in.</p>
     </div>
 
     <div class="table-wrap">
@@ -394,172 +391,91 @@
           <tr><td>Cells</td><td class="num-cell">9,600</td><td class="num-cell">576,000</td></tr>
           <tr><td>Memory</td><td class="num-cell">151 KiB</td><td class="num-cell">8.8 MiB</td></tr>
           <tr><td>Extent</td><td class="num-cell">30 × 40 m</td><td class="num-cell">30 × 30 × 40 m</td></tr>
-          <tr><td>Time to observe once, 5 rays at 8 Hz</td><td class="num-cell">seconds</td><td class="num-cell">~4 hours</td></tr>
+          <tr><td>Observed once, 5 rays at 8 Hz</td><td class="num-cell">seconds</td><td class="num-cell">~4 hours</td></tr>
         </tbody>
       </table>
     </div>
 
     <div class="body">
-      <p>Sixty times fewer cells, and the whole planning pipeline — stale-voxel clearing, manifold extraction, commanded-depth profile and waypoints — runs in <strong>21 µs</strong>. Against the 5 Hz the vehicle publishes at, that is a duty cycle of 0.01%: the representation is free on the embedded target, which is why it can run inside the LCM node rather than on a companion computer.</p>
-      <p>And it is dense enough to plan on. Over the survey, in steady state:</p>
-      <div class="params">
-        <div class="param"><dt>columns observed</dt><dd>77.8 <span>%</span></dd></div>
-        <div class="param"><dt>ahead of the nose</dt><dd>93.9 <span>%</span></dd></div>
-        <div class="param"><dt>after a 180° turn</dt><dd>13.3 <span>%</span></dd></div>
-      </div>
-      <p>Columns without a real observation are flagged rather than guessed at, so the avoidance checks skip them instead of triggering on the grid-floor default — the representation carries its own uncertainty rather than pretending to completeness. The 13.3% figure is the post-turn low, when the heading gate has invalidated the map and it is rebuilding; that recovery window is where the planner's rule of commanding the vehicle column from the most conservative source available — the shallowest manifold across the hull footprint, or the latest direct altitude return if shallower — earns its place.</p>
-      <p>Overhangs deserve their own sentence, because they are named among the reef hazards and an upper envelope cannot represent them. What it does instead is take the shallowest occupied voxel in each column, so an overhang's underside <em>becomes</em> the manifold and the vehicle is commanded above it: the planner always goes over structure, never under it. That is the conservative failure mode, and for a downward-imaging survey it is arguably the correct one — the cost is coverage beneath the overhang, not safety. Worth claiming as a property rather than conceding as a gap.</p>
-      <p>The genuine limitation is the projection itself: it is valid only while heading is roughly constant. That belongs in §11, not buried.</p>
+      <p>Sixty times fewer cells, and the whole planning pipeline — stale-voxel clearing, manifold extraction, commanded-depth profile, waypoints — runs in <strong>6.4 µs</strong> median on a fully observed map. Against the 5 Hz the vehicle publishes at that is a duty cycle of 0.003%: the representation is free on the embedded target, which is why it runs inside the LCM node rather than on a companion computer.</p>
+      <p>It is also dense enough to plan on. In steady state 78% of columns carry a real observation and 94% ahead of the nose, falling to 13% immediately after a turn has invalidated the map and it is rebuilding. Columns without an observation are flagged rather than guessed at, so the avoidance checks skip them instead of triggering on the grid-floor default — the representation carries its own uncertainty rather than pretending to completeness.</p>
+      <p><strong>Overhangs are a property, not a gap.</strong> An upper envelope cannot represent one, and what it does instead is take the shallowest occupied voxel per column, so an overhang's underside becomes the manifold and the vehicle is commanded above it. The planner goes over structure, never under. For downward imaging that is arguably correct; the cost is coverage beneath the overhang, not safety. The genuine limitation is the projection itself, valid only while heading is roughly constant — §10.</p>
     </div>
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">04</span><h2>The experiment</h2></div>
+    <div class="sec-head"><span class="num">04</span><h2>The controller as it now stands</h2></div>
     <div class="body">
-      <p>The test terrain is a parameterised proxy for reef rugosity rather than a reef itself: a repeatable, tunable worst case that isolates the control question. A 4-leg lawnmower flown across a 70° sawtooth ridge field — 20 m teeth on a 30 m seafloor with 10 m flats — with legs along the axis the teeth progress on, so each 40 m leg crosses roughly two and a third crests. The vehicle launches at the surface; the descent is excluded. Each leg transition is two 90° on-the-spot yaws, which exceed the stale-heading gate and invalidate the map.</p>
-      <p>All controllers <strong>share the deployed perception stack</strong> — the same occupancy grid, the same cliff manifold, the same measurements. Only the arbitration differs, so any difference measured is a property of the control law. Each condition is 15 noise realisations, the same seeds across controllers.</p>
-      <p>The simulator also carries a procedural reef generator — bommies, terraces, cliff-like faults — which is the more representative scenario and is listed in §9 as outstanding. The sawtooth is what the current numbers come from, and the paper should say so plainly.</p>
-      <p>The figure of merit is time held at imaging altitude, not ground covered: halting to reach altitude before moving on is correct behaviour for this survey, so scoring coverage would penalise the right answer.</p>
+      <p>Worth stating plainly, because several of the decisions below were arrived at during hardening and are load-bearing for the claims.</p>
+      <p>Five modes. Three command survey speed — <code>ALT_FOLLOW</code>, <code>OBSTACLE_HOLD</code>, <code>TAIL_CLEAR</code>. Two command zero — <code>OBSTACLE_CLEAR</code> ascending in place, <code>ALT_CORRECTION</code> descending in place. Selection runs off the depth error at the vehicle column through a Schmitt band, and the cliff-top latch overrides it while committed.</p>
+
+      <h3>Commitment: the cliff-top latch</h3>
+      <p>On detecting a forward obstacle the latch commits to a target depth and a peak position. The target ratchets shallower only; the peak ratchets forward only; release is position-gated at peak plus standoff plus vehicle length, or on a heading change beyond the staleness gate. While committed the commanded depth <em>is</em> the latch target and any mode other than <code>OBSTACLE_CLEAR</code> is overridden to <code>OBSTACLE_HOLD</code> — so the vehicle either climbs to the target or flies forward at it, and never descends mid-traverse.</p>
+
+      <h3>Sequencing: stop, converge, advance</h3>
+      <p>The two zero-speed modes are the sequencing mechanism. Where relief outruns the depth rate the vehicle halts, closes the vertical error, then advances — which is what produces time on altitude, and is the behaviour §5 shows a hierarchy cannot supply alongside commitment.</p>
+
+      <h3>The vehicle-column command</h3>
+      <p>Takes the shallower of the hull-footprint manifold minimum and the latest direct vertical range from DVL or altimeter. Two reasons, both learned the hard way. On a slope the nadir column knows nothing about terrain the bow and stern sit over. And after a turn wipes the map the manifold can be optimistic while a current altitude return is not — a stationary vehicle post-turn on a 70° face was commanded to descend from a manifold reading 1.08 m deeper than the true terrain under its stern, against a 1.0 m tail-safety band that consequently never engaged.</p>
+
+      <h3>Sensor validity comes from the sensor</h3>
+      <p>Beam validity is taken from what the message reports — per-beam flags and documented sentinels — not from a configured maximum range. A real sensor has already applied its own limit, so clamping a <em>valid</em> return to a configured maximum invents terrain: a genuine 30 m bottom lock reported as a hit at 25 m is a fabricated obstacle. The forward sonar is the exception and the reason is structural: its message carries no validity field at all.</p>
+
+      <h3>Representation validity under rotation</h3>
+      <p>Voxels carry the heading at which they were last observed and are discarded when the vehicle turns beyond 45°, with occupied voxels under the hull footprint exempt. This is not a tuning knob but an explicit model of when the 2-D projection is valid, and it is why a turn is the hardest moment for this controller.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="num">05</span><h2>Leg one · commitment and sequencing contend</h2></div>
+    <div class="body">
+      <p>A 4-leg lawnmower across a 70° sawtooth ridge field — 20 m teeth on a 30 m seafloor with 10 m flats, legs along the axis the teeth progress on, so each 40 m leg crosses about two and a third crests. The vehicle launches at the surface; the descent is excluded. Each leg transition is two 90° on-the-spot yaws, which exceed the staleness gate and invalidate the map. The terrain is a parameterised proxy for rugosity, not a reef.</p>
+      <p>All controllers <strong>share the deployed perception stack</strong> — same grid, same manifold, same measurements — so only the arbitration differs and any difference is a property of the control law. Fifteen noise realisations per condition, same seeds across controllers. The figure of merit is time held at imaging altitude, not ground covered: halting to reach altitude before advancing is correct behaviour here, so scoring coverage would penalise the right answer.</p>
     </div>
 
     <div class="table-wrap">
       <table>
         <thead>
-          <tr>
-            <th>Controller</th><th>commit</th><th>seq.</th>
-            <th>t@alt %</th><th>line (m)</th><th>worst clr</th><th>collided</th>
-          </tr>
+          <tr><th>Controller</th><th>commit</th><th>seq.</th>
+              <th>t@alt %</th><th>line (m)</th><th>worst clr</th><th>collided</th></tr>
         </thead>
         <tbody>
-          <tr>
-            <td>task priority</td><td class="dash">—</td><td class="dash">—</td>
-            <td class="num-cell">1.0 ± 0.1</td><td class="num-cell">2.4</td>
-            <td class="num-cell">0.82</td><td><span class="chip chip-have">0 / 15</span></td>
-          </tr>
-          <tr>
-            <td>+ dwell</td><td class="tick">✓</td><td class="dash">—</td>
-            <td class="num-cell">1.1 ± 0.1</td><td class="num-cell">2.7</td>
-            <td class="num-cell">0.82</td><td><span class="chip chip-have">0 / 15</span></td>
-          </tr>
-          <tr>
-            <td>+ stop-to-converge</td><td class="dash">—</td><td class="tick">✓</td>
-            <td class="num-cell">6.7 ± 1.1</td><td class="num-cell">13.1</td>
-            <td class="num-cell bad">−0.88</td><td><span class="chip chip-bad">4 / 15</span></td>
-          </tr>
-          <tr>
-            <td>+ both</td><td class="tick">✓</td><td class="tick">✓</td>
-            <td class="num-cell">4.9 ± 0.9</td><td class="num-cell">9.3</td>
-            <td class="num-cell warn">0.06</td><td><span class="chip chip-have">0 / 15</span></td>
-          </tr>
-          <tr class="row-hero">
-            <td>supervisory (deployed)</td><td class="tick">✓</td><td class="tick">✓</td>
-            <td class="num-cell">7.7 ± 0.4</td><td class="num-cell">14.9</td>
-            <td class="num-cell">0.93</td><td><span class="chip chip-have">0 / 15</span></td>
-          </tr>
+          <tr><td>task priority</td><td class="dash">—</td><td class="dash">—</td>
+              <td class="num-cell">1.0 ± 0.1</td><td class="num-cell">2.4</td>
+              <td class="num-cell">0.82</td><td><span class="chip chip-have">0 / 15</span></td></tr>
+          <tr><td>+ dwell</td><td class="tick">✓</td><td class="dash">—</td>
+              <td class="num-cell">1.1 ± 0.1</td><td class="num-cell">2.7</td>
+              <td class="num-cell">0.82</td><td><span class="chip chip-have">0 / 15</span></td></tr>
+          <tr><td>+ stop-to-converge</td><td class="dash">—</td><td class="tick">✓</td>
+              <td class="num-cell">6.7 ± 1.1</td><td class="num-cell">13.1</td>
+              <td class="num-cell bad">−0.88</td><td><span class="chip chip-bad">4 / 15</span></td></tr>
+          <tr><td>+ both</td><td class="tick">✓</td><td class="tick">✓</td>
+              <td class="num-cell">4.9 ± 0.9</td><td class="num-cell">9.3</td>
+              <td class="num-cell warn">0.06</td><td><span class="chip chip-have">0 / 15</span></td></tr>
+          <tr class="row-hero"><td>supervisory (deployed)</td><td class="tick">✓</td><td class="tick">✓</td>
+              <td class="num-cell">7.7 ± 0.4</td><td class="num-cell">14.9</td>
+              <td class="num-cell">0.93</td><td><span class="chip chip-have">0 / 15</span></td></tr>
         </tbody>
       </table>
     </div>
 
     <div class="body">
-      <p>Three readings, in order of how much weight they carry.</p>
-      <p><strong>Sequencing is what the mission needs.</strong> Adding stop-to-converge alone takes time-on-altitude from 1.0% to 6.7% — a sevenfold gain — where commitment alone moves it from 1.0% to 1.1%, which is nothing.</p>
+      <p><strong>Sequencing carries the mission.</strong> Stop-to-converge alone takes time-on-altitude from 1.0% to 6.7%, a sevenfold gain, where commitment alone moves it to 1.1%.</p>
       <p><strong>Sequencing alone is unsafe.</strong> Halting to converge means descending in place beside steep terrain, and without commitment the vehicle does that into the seabed in four runs of fifteen.</p>
-      <p><strong>Both together still fall short.</strong> Commitment restores safety — no collisions, worst clearance back above zero — but costs a third of the mission gain, ending at 4.9% against the deployed controller's 7.7% (t ≈ 11). And its worst-case clearance is 6 cm, safe only barely.</p>
+      <p><strong>Both together still fall short</strong> — 4.9% against 7.7%, and a worst-case clearance of 6 cm. And the mechanism is measurable, not inferred: adding dwell to the sequencing variant lifts set-based task occupancy from 34.9% to 53.1% while altitude convergence falls from 58.0% to 41.8%. Commitment is expressed by holding a task active; sequencing by the altitude task running long enough to converge; in a hierarchy those are the same variable, so every cycle spent committed is a cycle not spent converging. The trade is structural, not a tuning artefact.</p>
+      <p>The supervisory design does not face it because the two live in different places — the latch governs the depth target held through a traverse, mode selection governs whether the vehicle surges. They compose instead of contending. This is falsifiable: if some dwell duration escapes the trade-off, the claim is wrong. §8 records that sweep as outstanding.</p>
     </div>
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">05</span><h2>Why they compete</h2></div>
+    <div class="sec-head"><span class="num">06</span><h2>Leg two · liveness by construction</h2></div>
     <div class="body">
-      <p>The mechanism is measurable, not inferred. Adding dwell to the sequencing variant shifts where the controller spends its time:</p>
-      <div class="params">
-        <div class="param"><dt>set-based active</dt><dd>34.9 → 53.1 <span>%</span></dd></div>
-        <div class="param"><dt>altitude converging</dt><dd>58.0 → 41.8 <span>%</span></dd></div>
-      </div>
-      <p>Commitment is expressed by holding a set-based task active. Sequencing is expressed by the altitude task running long enough to converge. In a priority hierarchy both are the same variable — which task is active — so every cycle spent committed is a cycle not spent converging. The trade is structural, not a tuning artefact.</p>
-      <p>The supervisory design does not face it, because the two live in different places: the cliff latch governs the depth target held through an obstacle traverse, while mode selection governs whether the vehicle surges. They compose instead of contending.</p>
-      <p>This is the paper's core argument and it is falsifiable: if some dwell duration escapes the trade-off, the claim is wrong. See §9.</p>
-    </div>
-  </section>
-
-  <section>
-    <div class="sec-head"><span class="num">06</span><h2>Tuning is thresholds, not weights</h2></div>
-    <div class="body">
-      <p>A second advantage, and a real one for field deployment. Every parameter of the deployed controller is a physical threshold an operator can state without knowing the control law:</p>
-      <dl class="params">
-        <div class="param"><dt>Imaging altitude</dt><dd>2.0 <span>m</span></dd></div>
-        <div class="param"><dt>Cliff standoff</dt><dd>2.0 <span>m</span></dd></div>
-        <div class="param"><dt>Safety band</dt><dd>1.0 <span>m</span></dd></div>
-        <div class="param"><dt>Vehicle length</dt><dd>2.0 <span>m</span></dd></div>
-        <div class="param"><dt>Heading gate</dt><dd>45 <span>°</span></dd></div>
-        <div class="param"><dt>Grid bin</dt><dd>0.5 × 0.25 <span>m</span></dd></div>
-      </dl>
-      <p>"Fly two metres above the seabed, stand off two metres from a cliff, never let terrain come within a metre of the hull." Each is independently meaningful and independently adjustable — raising the standoff does not change what the safety band means.</p>
-      <p>The task-priority variants need a dwell duration and a convergence band whose <em>only</em> interpretation is how much priority one task takes from another, and §5 shows they interact: changing one changes what the other does. That is the difference between commissioning a vehicle by stating physical margins and commissioning it by balancing gains until the behaviour looks right — and it is the kind of difference that decides whether a method survives contact with an operations team.</p>
-    </div>
-  </section>
-
-  <section>
-    <div class="sec-head"><span class="num">07</span><h2>What can and cannot be claimed</h2></div>
-    <div class="body">
-      <p>Determinism is not a contribution — most classical controllers are deterministic. <strong>Verifiability</strong> is, and the design is well placed for it: a small finite mode set, an explicit priority order, transitions on scalar comparisons.</p>
-      <h3>Claimable, with work</h3>
-      <ul>
-        <li><strong>Safety.</strong> Commanded depth never intersects the manifold plus margin, over a stated terrain class and sensor model.</li>
-        <li><strong>Termination.</strong> The latch releases in finite time under forward progress — monotone ratchets make <code>release_x</code> non-decreasing while along-track position strictly increases.</li>
-        <li><strong>No chatter.</strong> The hysteresis band on mode selection admits a dwell-time argument.</li>
-      </ul>
-      <h3>Not claimable as stated</h3>
-      <p>"The vehicle can never enter a stuck control state" is too strong, and the source documents the exception: where the obstacle top is above the surface, the vehicle ascends against its depth limit and stays there. Presented as a single designed terminal condition — reached only when the task is infeasible, failing safe rather than commanding through terrain, with escape defined at mission level — it is a strength. Presented as an absolute, a reviewer finds the exception and distrusts the rest.</p>
-      <h3>Name the artifact</h3>
-      <p>A correctness property holds of something specific: a model, or the code that flies. State the property over the model of §III, establish it there, and say how the implementation is held to it. That link is easy here — the deployed core is one version-pinned artifact shared by the vehicle node, the simulator and the replay path, so the thing tested is the thing that flies.</p>
-    </div>
-  </section>
-
-  <section>
-    <div class="sec-head"><span class="num">08</span><h2>Proving no zero-progress livelock</h2></div>
-    <div class="body">
-      <p>The controller this one replaced could livelock — its history carries a fix described as helping the rise-over routine "resolve if stuck". Ruling that out by construction is a claim worth making, and the mode logic is small enough to support it. What follows is the argument, its obligations on the implementation, and the one obligation the code does not currently meet.</p>
-
-      <h3>The property</h3>
+      <p>The controller this replaced could livelock; its history carries a fix meant to help the rise-over routine "resolve if stuck". Ruling that class out by construction is a claim worth making, and separating commitment from sequencing is what makes the mode graph small enough to support it.</p>
       <div class="claim">
-        <p>Every maximal interval of control cycles commanding zero forward speed is finite, except one: the vehicle held at the surface constraint by a target it cannot reach. Mission termination aside, that is the only state from which forward progress does not resume.</p>
+        <p>Every maximal interval of cycles commanding zero forward speed is finite, except one: the vehicle held at the surface by a target it cannot reach. Mission end aside, that is the only state from which forward progress does not resume.</p>
       </div>
-
-      <h3>Facts established from the implementation</h3>
-      <p>Three properties of the mode logic, checked exhaustively over the transition function rather than argued informally:</p>
-      <ul>
-        <li>Zero forward speed occurs in exactly two modes, <code>OBSTACLE_CLEAR</code> and <code>ALT_CORRECTION</code>. The other three command <code>survey_speed</code>.</li>
-        <li>Within <code>OBSTACLE_CLEAR</code> the Schmitt band holds the mode only while <code>dz &lt; −(T−h)</code>, so the separate 0.1 m test that gates speed there is always satisfied: forward speed is identically zero in that mode, never intermittent.</li>
-        <li>The branch handling both mode predicates being true simultaneously is <strong>unreachable</strong> — no combination of previous mode and depth error satisfies both. The automaton has three outcomes, not four, which is worth stating because it removes a case from the proof.</li>
-      </ul>
-
-      <h3>The argument</h3>
-      <p>Write <code>dz = cmd_depth[cx] − vehicle_depth</code>, threshold <code>T</code>, hysteresis <code>h</code>, and <code>inside = T − h</code>.</p>
-      <ul>
-        <li><strong>ALT_CORRECTION cannot persist.</strong> The mode holds only while <code>dz &gt; inside</code>. Commanded depth is bounded above by the grid floor, and the vehicle descends at <code>vertical_speed</code> throughout, so <code>dz</code> strictly decreases and the mode is left after at most <code>(dz₀ − inside) / (vertical_speed · dt)</code> cycles. No terminal case.</li>
-        <li><strong>OBSTACLE_CLEAR persists only toward the surface.</strong> The mode holds only while <code>dz &lt; −inside</code>, meaning the target lies above the vehicle, and the vehicle ascends throughout. Commanded depth is clamped at zero by construction, and the latch's target ratchets shallower only — monotone and bounded below. Because those values live on the grid's <code>dz</code> quantisation, monotone and bounded gives <em>finitely many</em> changes rather than mere asymptotic convergence, which is what closes the argument in finite time rather than in the limit. So the target becomes constant, the vehicle reaches it and leaves the mode with forward speed restored — or the vehicle reaches zero depth first, which is the permitted terminal state.</li>
-        <li><strong>Cycling between the two requires passing through a forward-progress mode</strong> — provided the depth error cannot jump the whole hysteresis structure in one cycle. This is the step that needs an assumption, and it is where the implementation falls short.</li>
-      </ul>
-
-      <h3>The transition is legitimate — and it is also the failure mode</h3>
-      <p>Going from <code>OBSTACLE_CLEAR</code> straight to <code>ALT_CORRECTION</code> is not an error to be designed out. Crossing a pinnacle is exactly when it should happen: the vehicle ascends beside the feature, its slanted Janus beams clear the top and begin returning the seabed well below, the commanded depth jumps deeper, and descending is the correct response. Suppressing that with a blanket rate limit on the command would delay a correction the vehicle genuinely needs.</p>
-      <p>But the same physics is the livelock mechanism. Stationary beside a pinnacle with forward speed at zero, the vehicle ascends until its beams clear the top, the command drops, it descends until the beams catch the top again, the command rises, and it ascends. Vertical oscillation, no forward progress, indefinitely. Which is precisely the trap the earlier controller fell into.</p>
-
-      <h3>The latch already rules it out — where it applies</h3>
-      <div class="claim">
-        <p>While the cliff-top latch is committed the commanded depth <em>is</em> the latch target, which ratchets shallower only, and any mode other than <code>OBSTACLE_CLEAR</code> is overridden to <code>OBSTACLE_HOLD</code>. <code>ALT_CORRECTION</code> is therefore unreachable while latched, and with it the oscillation. The construct that supplies commitment supplies the liveness guarantee too — the same separation §5 argues for, showing up as a proof obligation discharged rather than a behaviour tuned in.</p>
-      </div>
-      <p>Inside a latched episode the argument closes cleanly: the target is monotone and bounded below by zero on the grid quantisation, so it changes finitely often, the ascent reaches it in finite time, and the mode becomes <code>OBSTACLE_HOLD</code> with forward speed restored — or the vehicle reaches the surface, the permitted terminal state.</p>
-
-      <h3>The invariant, and the guard that enforces it</h3>
-      <p>Stated as a property of the automaton rather than as a bound on a signal: <strong>an ascent, once begun, is completed.</strong> <code>OBSTACLE_CLEAR</code> exits upward only — to <code>OBSTACLE_HOLD</code> when the latch carries it forward, or to <code>ALT_FOLLOW</code> when the target is reached. It never turns straight into a descent. While climbing the vehicle has not moved, so nothing that justified the climb has changed except its own altitude, and a command to descend at that instant means the beams have begun to see past the obstacle — the observation this design exists to refuse mid-manoeuvre.</p>
-      <p>The latch enforces this where it applies, by construction. Outside a latch it needs one guard, now in place: from <code>OBSTACLE_CLEAR</code>, a descent request yields <code>ALT_FOLLOW</code> rather than <code>ALT_CORRECTION</code>. Re-checking the transition function exhaustively afterwards, <code>OBSTACLE_CLEAR</code> reaches only <code>{ALT_FOLLOW, OBSTACLE_CLEAR}</code> — every exit commands forward speed.</p>
-      <div class="claim">
-        <p>That closes the argument without any assumption about how fast the command may move. The two zero-progress modes cannot alternate, because the transition between them is gone. <code>ALT_CORRECTION</code> cannot persist against a bounded command and a monotone descent. <code>OBSTACLE_CLEAR</code> persists only toward the surface. So the sole unbounded zero-progress state is the vehicle held at the surface by a target it cannot reach — which is the property as originally stated, now proved rather than assumed.</p>
-      </div>
+      <p>The transition relation was enumerated exhaustively over the mode selection, the latch override and the tail-clearance hook, across the range of depth error, previous mode, latch state and tail state. Three facts fall out. Zero forward speed occurs in exactly two modes. The branch handling both mode predicates being true is unreachable, so the automaton has three outcomes rather than four. And of the twenty-four edges in the relation, exactly one is absent — the one that matters.</p>
     </div>
-
     <figure>
       <div class="fig-frame">
         <svg viewBox="0 0 960 470" role="img" aria-label="Mode transition graph. The two zero-forward-velocity states, ALT_CORRECTION and OBSTACLE_CLEAR, are joined by a single edge from ALT_CORRECTION to OBSTACLE_CLEAR. The return edge is removed by the ascent guard, so no cycle exists among them and every path between them leaves through a forward-progress state.">
@@ -641,40 +557,35 @@
         <b>Figure 2 · why no zero-progress cycle exists</b><br>
         Edge labels use <code>v</code> for vehicle depth, <code>T</code> for the overshoot threshold. The subgraph induced on the two zero-velocity states contains exactly one edge, <code>ALT_CORRECTION → OBSTACLE_CLEAR</code>; the return edge is absent, so that subgraph is acyclic and every path between the two must leave through the forward-progress region above. The self-transitions are bounded separately: <code>ALT_CORRECTION</code> descends against a command bounded by the grid floor, and <code>OBSTACLE_CLEAR</code> ascends toward a monotone target on a discrete grid that is clamped at zero — so each is left in finite time, or the vehicle arrives at the surface with an unreachable target, which is the sole state from which forward motion does not resume.
       </figcaption>
-    </figure>
-
-    <div class="body">
-      <p>Two honest notes on the guard. It changed no outcome across the full lawnmower mission: <code>OBSTACLE_CLEAR</code> exited to <code>OBSTACLE_HOLD</code> thirty-four times and otherwise persisted, and the forbidden transition never arose — because every rise in that terrain is ahead of the nose, so the forward scan fires and the latch commits, and the latch already forbade it. The guard is therefore a safety net for a case the current scenarios do not produce, and saying so is better than implying it was load-bearing.</p>
-      <p>The case that would exercise it is a pinnacle beneath the hull but not ahead of the nose: the footprint rule raises the command and drives an ascent while the forward scan never fires and the latch never commits. A terrain fixture holding exactly that geometry — showing the unguarded logic oscillating and the guarded logic escaping — would be both the regression test this property deserves and a compact figure for the paper.</p>
-
-      <h3>What this is and is not</h3>
-      <p>This is a proof about the mode logic given a bounded command signal — worth stating precisely as that. It is not a proof about the mapping, the sensors, or the vehicle's ability to follow the command, and it says nothing about whether the commanded depth is <em>correct</em>; §7 covers what safety would require. Model checking the automaton would confirm the case analysis mechanically and is the natural next step, but the finite-time bounds above are the substance and they come from monotonicity, not from search.</p>
+    </figure>    <div class="body">
+      <p><strong>An ascent, once begun, is completed.</strong> <code>OBSTACLE_CLEAR</code> exits upward only — to <code>OBSTACLE_HOLD</code> when the latch carries it forward, or to <code>ALT_FOLLOW</code> when the target is reached — and never straight into a descent. While climbing the vehicle has not moved, so nothing that justified the climb has changed except its own altitude; a command to descend at that instant means the slanted beams have begun to see past the obstacle, which is the observation this design exists to refuse mid-manoeuvre. The legitimate form of that transition happens after the vehicle has flown over the feature, from <code>OBSTACLE_HOLD</code>, and is untouched.</p>
+      <p>The latch enforced this wherever it applied. Outside a latch it needed one guard, now in place. With it, the induced subgraph on the two zero-velocity states holds a single edge and is acyclic, so no cycle can live there and every path between them exits through the forward-progress band. The self-transitions carry separate bounds: <code>ALT_CORRECTION</code> descends against a command bounded by the grid floor; <code>OBSTACLE_CLEAR</code> ascends toward a target that is monotone, clamped at zero, and quantised by the grid — so monotone-and-bounded gives finitely many changes rather than asymptotic convergence, which closes the argument in finite time rather than in the limit.</p>
+      <p>Two honest notes. The guard changed no outcome across the full mission — <code>OBSTACLE_CLEAR</code> exited to <code>OBSTACLE_HOLD</code> thirty-four times and otherwise persisted, and the forbidden transition never arose, because every rise in that terrain lies ahead of the nose so the forward scan fires and the latch commits. It is a safety net for a case the current scenarios do not produce, and saying so is better than implying it was load-bearing. The geometry that would exercise it is a pinnacle beneath the hull but not ahead of the nose, where the footprint rule drives an ascent without the latch committing; a fixture for that is outstanding.</p>
+      <p>And this is a proof about the mode logic, not about the mapping, the sensors, or whether the commanded depth is <em>correct</em>. Safety — that the command never intersects the manifold plus margin — is a separate property over a stated terrain and sensor model, and is not claimed here. Model checking would confirm the case analysis mechanically; the finite-time bounds come from monotonicity, not from search.</p>
     </div>
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">09</span><h2>Evidence: held and outstanding</h2></div>
+    <div class="sec-head"><span class="num">07</span><h2>Tuning is thresholds, not weights</h2></div>
     <div class="body">
-      <h3>In hand</h3>
-      <ul>
-        <li><span class="chip chip-have">have</span> The comparison above: five controllers, shared perception, 15 seeded noise realisations, reproducible from the repository.</li>
-        <li><span class="chip chip-have">have</span> A set-based task-priority baseline with commitment and sequencing available independently — the thing reviewers will ask for.</li>
-        <li><span class="chip chip-have">have</span> A validated C++ core deployed as an LCM node, version-pinned into the vehicle codebase.</li>
-        <li><span class="chip chip-have">have</span> Field logs and a replay tool driving the identical mapper the vehicle runs, with the same sensor gating on both paths.</li>
-        <li><span class="chip chip-have">have</span> Representation measurements — cell count, memory, 21 µs pipeline timing, observed-column fraction — taken from the deployed core rather than estimated.</li>
-      </ul>
-      <h3>Outstanding</h3>
-      <ul>
-        <li><span class="chip chip-need">do</span> <strong>Sweep the dwell duration.</strong> §5 predicts no setting escapes the trade-off. If one does, the necessity claim is wrong and the paper changes. This is the single most important remaining experiment.</li>
-        <li><span class="chip chip-need">do</span> <strong>A straddled-pinnacle terrain fixture</strong> — §8. The one geometry that exercises the no-livelock guard, and currently untested: the unguarded logic should oscillate on it and the guarded logic escape. Regression test and paper figure in one.</li>
-        <li><span class="chip chip-need">do</span> <strong>Model-check the mode automaton</strong> to confirm the case analysis of §8 mechanically, and the safety property of §7 alongside it.</li>
-        <li><span class="chip chip-need">do</span> <strong>Run both controllers in Gazebo SITL over the reef reconstruction.</strong> Headline closed-loop results, with both as their real implementations. The original is recoverable from version control at the commit before oa-mapper replaced it, and doubles as the simulator-fidelity arm.</li>
-        <li><span class="chip chip-need">do</span> <strong>Run the sawtooth in SITL too.</strong> Same geometry as the Python sweeps, full stack. Cheap to set up from the same parametric definition, and it is what licenses the sweeps as evidence rather than as illustration.</li>
-        <li><span class="chip chip-need">do</span> <strong>Reconstruction coverage check.</strong> Confirm the mesh is dense where the counterfactual trajectories would fly, not only where the earlier controller went.</li>
-        <li><span class="chip chip-need">do</span> <strong>A cliff regression case that validates rather than detects.</strong> The current one is degenerate: past the step the vehicle sits below the surface and the caster hits on every beam.</li>
-      </ul>
-      <h3>Two axes, not a quality ladder</h3>
-      <p>Terrain and stack fidelity are independent choices. Synthetic parameterised terrain runs in Gazebo as readily as a photogrammetric mesh does, so the real distinction between instruments is cost per run — which decides what experiments are affordable, not what they are worth.</p>
+      <p>A deployment property, and a consequence of the same separation. Every parameter is a physical margin an operator can state without knowing the control law:</p>
+      <dl class="params">
+        <div class="param"><dt>Imaging altitude</dt><dd>2.0 <span>m</span></dd></div>
+        <div class="param"><dt>Cliff standoff</dt><dd>2.0 <span>m</span></dd></div>
+        <div class="param"><dt>Safety band</dt><dd>1.0 <span>m</span></dd></div>
+        <div class="param"><dt>Tail standoff</dt><dd>2.0 <span>m</span></dd></div>
+        <div class="param"><dt>Heading gate</dt><dd>45 <span>°</span></dd></div>
+        <div class="param"><dt>Grid bin</dt><dd>0.5 × 0.25 <span>m</span></dd></div>
+      </dl>
+      <p>"Fly two metres above the seabed, stand off two metres from a cliff, never let terrain come within a metre of the hull." Each is independently meaningful and independently adjustable: raising the standoff does not change what the safety band means.</p>
+      <p>The task-priority variants need a dwell duration and a convergence band whose only interpretation is how much priority one task takes from another — and §5 measured them interacting. That is the difference between commissioning a vehicle by stating physical margins and commissioning it by balancing gains until the behaviour looks right, and it is the kind of difference that decides whether a method survives contact with an operations team.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="num">08</span><h2>Evidence</h2></div>
+    <div class="body">
+      <p>Terrain and stack fidelity are independent choices — synthetic terrain runs in Gazebo as readily as a photogrammetric mesh — so the distinction between instruments is cost per run, which decides what is affordable rather than what is worth doing.</p>
     </div>
 
     <div class="table-wrap">
@@ -682,188 +593,137 @@
         <thead><tr><th></th><th>Synthetic sawtooth</th><th>Reconstructed reef mesh</th></tr></thead>
         <tbody>
           <tr><td>Python sim<br><span class="cell-note">seconds per run</span></td>
-              <td><span class="chip chip-have">have</span> Seeds, sweeps, single-mechanism ablations. Everything held fixed but the one variable under test.</td>
-              <td>Not needed. Height-field sensing cannot represent the geometry that makes a mesh worth having — see below.</td></tr>
+              <td><span class="chip chip-have">have</span> Seeds, sweeps, single-mechanism ablations. Height-field terrain by design.</td>
+              <td>Not needed — height-field sensing cannot represent what makes a mesh worth having.</td></tr>
           <tr><td>Gazebo SITL<br><span class="cell-note">minutes per run</span></td>
-              <td><span class="chip chip-need">to run</span> Same geometry as the cheap instrument, full stack. Cross-validates the sweeps.</td>
-              <td><span class="chip chip-need">to run</span> Headline closed-loop results, and the arm that measures fidelity against the water.</td></tr>
+              <td><span class="chip chip-need">to run</span> Same geometry, full stack. Cross-validates the sweeps.</td>
+              <td><span class="chip chip-need">to run</span> Headline results, and fidelity against the water.</td></tr>
         </tbody>
       </table>
     </div>
 
     <div class="body">
-      <p>Open-loop replay on the recorded sensor streams sits outside the table: it is the only instrument that sees real dropouts, multipath and beam-quality variation, none of which any simulator produces, and it supports per-cycle counterfactuals against the method that actually flew.</p>
+      <p>Open-loop replay on recorded sensor streams sits outside the table: the only instrument that sees real dropouts, multipath and beam-quality variation, and the one that supports per-cycle counterfactuals against the method that actually flew.</p>
 
       <h3>The validation chain</h3>
-      <p>Read as a chain rather than as four experiments, the design answers the obvious objection to every cell:</p>
+      <p>Read as a chain rather than as four experiments, the design answers the standing objection to every cell.</p>
       <ul>
-        <li><strong>Python sawtooth against SITL sawtooth.</strong> Identical geometry, different stack. Agreement means the cheap instrument's sweeps can be trusted, which matters because fifteen seeds across five controllers with parameter sweeps is affordable nowhere else. Disagreement is diagnostic — it isolates the kinematic model, since terrain is held fixed.</li>
-        <li><strong>SITL reef against the real mission.</strong> The original controller's own binary, over the reconstruction of the reef it actually surveyed. Agreement means the simulation reproduces the deployment; because it is the same code, divergence is attributable to the simulator rather than to a reimplementation.</li>
+        <li><strong>Python sawtooth against SITL sawtooth.</strong> Identical geometry, different stack. Agreement licenses the cheap instrument's sweeps as evidence — which matters, because fifteen seeds across five controllers with parameter sweeps is affordable nowhere else. Disagreement isolates the kinematic model, since terrain is held fixed.</li>
+        <li><strong>SITL reef against the real mission.</strong> The original controller's own binary, over the reconstruction of the reef it actually surveyed. Because it is the same code, divergence is attributable to the simulator rather than to a reimplementation. Compare distributions over bounded windows, not trajectories — nav drift guarantees path divergence under identical control.</li>
       </ul>
       <div class="claim">
-        <p>Chained, those two bridges carry credibility from the water back to the cheap sweeps: the parameter studies are trusted because SITL agrees with them on identical terrain, and SITL is trusted because it reproduces what the vehicle actually did. That is a stronger methodological position than any single instrument can hold, and it costs two comparisons rather than new apparatus.</p>
+        <p>Chained, those two bridges carry credibility from the water back to the cheap sweeps. The parameter studies are trusted because SITL reproduces them on identical terrain, and SITL is trusted because it reproduces what the vehicle actually did. Two comparisons, no new apparatus, and a stronger position than any single instrument can hold.</p>
       </div>
 
-      <h3>Fly the original controller in SITL — it validates the instrument</h3>
-      <p>The controller that flew these missions is recoverable in full from version control, immediately prior to its replacement. It is a reactive altitude-following method: take the smaller of the sonar and nav altitudes, halt when too close, ramp forward velocity down on altitude error, with a rise-over routine that accrued a later fix described as helping it "resolve if stuck".</p>
-      <p>Running it in SITL is worth having as a comparison arm — a baseline that genuinely flew, from before this work existed, is far harder to dismiss than one built for the paper. But that is the lesser reason.</p>
-      <div class="claim">
-        <p>The greater reason is that it validates the instrument. The same binary flew the real mission over this reef and can fly it again over its reconstruction. Comparing the two answers the question every reviewer has about simulation on real geometry — <em>does it reproduce reality?</em> — with a measurement rather than an assurance. And because it is the same code, any divergence is attributable to the simulation itself, not to a reimplementation. Establish fidelity once with the old controller and every other arm inherits it.</p>
-      </div>
-      <p>Design it as distributions rather than trajectories: nav drift and disturbances guarantee divergence over a full mission even under identical control, so compare mode occupancy, altitude and clearance histograms over bounded windows. Treat a negative result as a result — if SITL does not reproduce the old controller's behaviour, that is worth knowing before the paper rests on it, and it points at the sensor or dynamics model rather than at the terrain.</p>
-
-      <h3>Why the overhang claim belongs to SITL</h3>
-      <p>Settled: instrument B keeps its height-field terrain and gains no mesh ray-casting. The reasoning belongs in the paper, because it is the reasoning a reviewer would apply.</p>
-      <p>B's sensors march a ray and test it against a height field, and a height field is built by keeping the topmost surface per cell — <em>the same upper-envelope convention the manifold itself uses</em>. Sensors that cannot see beneath an overhang, feeding a representation that cannot express one, agree by construction. Any overhang result from that instrument would be circular and correctly discounted.</p>
-      <p>Gazebo carries mesh geometry natively, so a beam there can return an overhang's underside and the map must then decide what to do with it. That makes §3's claim — the planner commands over structure, never under it — a measurement rather than a restatement of the assumption. B stays a controlled ablation instrument and does not pretend to geometry it cannot represent, which is a cleaner position than half-supporting it.</p>
-
-      <h3>What none of the three is</h3>
+      <h3>Held</h3>
       <ul>
-        <li><strong>Not a closed-loop field trial.</strong> No instrument here has this controller commanding the real vehicle over real reef. Say so once, plainly, and the rest of the evaluation reads as honest rather than as an omission.</li>
-        <li><strong>Simulated acoustics, even in SITL.</strong> Sensor plugins approximate the returns; multipath, dropout structure and beam-quality variation belong to instrument C alone. The gating logic this system depends on is exercised properly only there.</li>
-        <li><strong>Reconstruction coverage is not neutral.</strong> The mesh comes from imagery the vehicle collected while flying the earlier controller, so it is densest where that controller went — and potentially thin exactly where this one would fly differently, such as closer over crests the old method stood off from. Check coverage against the counterfactual trajectories rather than assuming it.</li>
-        <li><strong>Watch the collision mesh.</strong> A dense photogrammetric reconstruction has to be decimated for physics, and decimation removes small-scale relief first — which is precisely the rugosity the controller is responding to. Confirm the decimated mesh still carries structure at the vehicle's own length scale, or the simulation will quietly flatter every controller equally.</li>
+        <li><span class="chip chip-have">have</span> The five-controller comparison: shared perception, fifteen seeded realisations, reproducible from the repository.</li>
+        <li><span class="chip chip-have">have</span> A set-based task-priority baseline with commitment and sequencing as independent switches — the thing reviewers ask for.</li>
+        <li><span class="chip chip-have">have</span> A validated C++ core deployed as an LCM node, version-pinned into the vehicle codebase and shared by simulator and replay.</li>
+        <li><span class="chip chip-have">have</span> Extensive reef-slope logs, and metrically accurate photogrammetric reconstructions of those sites from the vehicle's own stereo imagery.</li>
+        <li><span class="chip chip-have">have</span> Representation and timing measurements taken from the deployed core.</li>
       </ul>
 
-      <p>The weak method that actually flew is an asset rather than an embarrassment: it is a real-world baseline with a real outcome. Where it lost altitude or closed on terrain, the per-cycle counterfactual shows what this controller would have commanded at that same state — which is exactly the defensible form of the claim, and more persuasive on real reef slopes than any synthetic scenario.</p>
-
-      <h3>Disclose</h3>
+      <h3>Outstanding</h3>
       <ul>
-        <li><span class="chip chip-gap">gap</span> The altimeter no-return test compares range against a configured maximum, standing in for the quality field and zero sentinel the message already carries.</li>
-        <li><span class="chip chip-gap">gap</span> Off-slant DVL beams may fill but not clear voxels — their 2-D projection misrepresents which voxels they traversed.</li>
-        <li><span class="chip chip-gap">gap</span> The forward sonar message carries no validity flag at all, so its no-return inference is necessarily heuristic.</li>
+        <li><span class="chip chip-need">do</span> <strong>Sweep the dwell duration.</strong> §5 predicts no setting escapes the trade-off. If one does, the necessity claim is wrong and the paper changes. The one experiment that cannot be skipped.</li>
+        <li><span class="chip chip-need">do</span> <strong>Both controllers in SITL over the reef mesh</strong>, as their own implementations. Headline results and the fidelity arm at once.</li>
+        <li><span class="chip chip-need">do</span> <strong>The sawtooth in SITL</strong> — cheap from the same parametric definition, and what licenses the sweeps.</li>
+        <li><span class="chip chip-need">do</span> <strong>A straddled-pinnacle fixture</strong> — §6. The one geometry that exercises the liveness guard, currently untested by execution.</li>
+        <li><span class="chip chip-need">do</span> <strong>Reconstruction coverage check.</strong> The mesh is densest where the earlier controller flew, and possibly thin where this one would fly differently.</li>
       </ul>
+
+      <h3>What none of it is</h3>
+      <p>No instrument here has this controller commanding the real vehicle over real reef. Say so once, plainly. Sensor plugins approximate acoustics even in SITL; navigation is perfect where the real mission accumulates drift; and a dense reconstruction must be decimated for physics, which removes small-scale relief first — precisely the rugosity the controller responds to, so confirm the collision mesh still carries structure at the vehicle's own length scale or the simulation will flatter every controller equally.</p>
     </div>
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">10</span><h2>Proposed structure</h2></div>
+    <div class="sec-head"><span class="num">09</span><h2>Structure for eight pages</h2></div>
     <div class="body">
-      <p>Eight pages — the six-page RA-L base plus the two over-length pages — with the conference option for the talk. That is roughly two pages more than the minimum cut, and the right place to spend them is the representation and the results, not a longer introduction. Verify the current page and fee rules against the call; they move.</p>
+      <p>Six pages plus the two over-length pages, with the conference option for the talk. Confirm the current page and fee rules against the call; they move.</p>
     </div>
     <ol class="outline">
       <li><span class="o-num">I</span><div>
         <p class="o-title">Introduction · ~1 pp</p>
-        <p class="o-note">Reef-slope survey at fixed imaging altitude; rugosity as a continuous hazard rather than isolated obstacles. Contributions as three ordered bullets, contention first.</p>
+        <p class="o-note">Reef-slope survey at fixed altitude; rugosity as a continuous hazard. Both legs of the claim stated in the first column, with a three-line contribution list.</p>
       </div></li>
       <li><span class="o-num">II</span><div>
         <p class="o-title">Related work · ~0.75 pp</p>
         <p class="o-note">Task-priority and null-space control in marine robotics, set-based tasks, reactive avoidance, underwater occupancy and elevation mapping. Position against arbitration, not against mapping.</p>
       </div></li>
       <li><span class="o-num">III</span><div>
-        <p class="o-title">Representation: the cliff manifold · ~1.25 pp</p>
-        <p class="o-note">Its own section at this length. The sensing budget makes a volumetric map unfillable; the projection is what makes five rays per cycle sufficient. Cell count, memory, 21 µs pipeline, observed-column fraction, observed-versus-inferred flagging, and overhangs traversed above rather than under.</p>
+        <p class="o-title">Representation · ~1.25 pp</p>
+        <p class="o-note">The sensing budget makes a volumetric map unfillable; the projection is what makes five rays per cycle sufficient. Cells, memory, 6.4 µs, observed-column fraction, observed-versus-inferred flagging, overhangs traversed above rather than under.</p>
       </div></li>
       <li><span class="o-num">IV</span><div>
-        <p class="o-title">Supervisory controller · ~1.25 pp</p>
-        <p class="o-note">Mode set, priority order, the latch with its monotone ratchets and release conditions, and the vehicle-column rule taking the most conservative available source. Present as a hybrid automaton, with the separation of commitment from sequencing made explicit — this is what the results then test. Close with the no-livelock property of §8: finite-time bounds on both zero-progress modes, the surface as the sole terminal state, and the slew condition it rests on. Half a column, and it is the kind of guarantee the method this replaced could not offer.</p>
+        <p class="o-title">Supervisory controller · ~1.5 pp</p>
+        <p class="o-note">§4 as a hybrid automaton: modes, the latch, the conservative vehicle-column rule, sensor-reported validity, heading staleness as a validity model. Close with the liveness property and Figure 2 — the transition graph carries the mode structure and the guarantee in one figure.</p>
       </div></li>
       <li><span class="o-num">V</span><div>
         <p class="o-title">Task-priority baseline · ~0.75 pp</p>
         <p class="o-note">Construction, the reduction to strict priority in one DOF, and the two additions as independent switches. Short but load-bearing: it is what makes the comparison credible rather than a straw man.</p>
       </div></li>
       <li><span class="o-num">VI</span><div>
-        <p class="o-title">Experiments and results · ~2.5 pp</p>
-        <p class="o-note">Mission and metric definition, the five-controller table, the contention mechanism, the dwell sweep, and field results on reef terrain. Headline: sequencing carries the mission, commitment carries safety, one channel cannot carry both.</p>
+        <p class="o-title">Experiments and results · ~2.25 pp</p>
+        <p class="o-note">Instruments and the validation chain, the five-controller table, the contention mechanism, the dwell sweep, reef results. Headline: sequencing carries the mission, commitment carries safety, one channel cannot carry both.</p>
       </div></li>
       <li><span class="o-num">VII</span><div>
         <p class="o-title">Discussion · ~0.5 pp</p>
-        <p class="o-note">Threshold tuning versus priority weighting; the terrain-imposed ceiling; limitations stated plainly.</p>
+        <p class="o-note">Threshold tuning versus priority weighting; the terrain-imposed ceiling; limitations.</p>
       </div></li>
       <li><span class="o-num">VIII</span><div>
         <p class="o-title">Conclusion · ~0.25 pp</p>
       </div></li>
     </ol>
     <div class="body">
-      <h3>Figure budget</h3>
-      <p>Six figures and one table is about right for eight pages. Every one should carry an argument rather than illustrate the system.</p>
+      <h3>Figures</h3>
       <ul>
-        <li><strong>1 · The environment.</strong> Reef-slope bathymetry with the vehicle at imaging altitude inside the structure. Establishes that the hazard is continuous.</li>
-        <li><strong>2 · Representation.</strong> Occupancy grid to manifold to commanded-depth profile, one panel each, with the unobserved columns visibly flagged.</li>
-        <li><strong>3 · The manoeuvre.</strong> The depth-profile figure: commit, the unobservable span, release after tail clearance.</li>
-        <li><strong>4 · Mode structure and the liveness argument.</strong> The transition graph of §8 — commitment and sequencing as separate channels, the two zero-velocity states banded together, and the absent edge drawn as absent. This figure <em>is</em> two arguments at once, which is why it earns a full column.</li>
-        <li><strong>Table I · Results.</strong> The controllers — task priority and its two additions, the original deployed method, and this one — with commitment and sequencing columns, time-on-altitude, clearance and collisions.</li>
-        <li><strong>5 · Contention.</strong> Set-based occupancy against altitude convergence as dwell increases; the dwell sweep on the same axes. The mechanism made visible.</li>
-        <li><strong>6 · Real reef slope.</strong> A recorded transect: reconstructed bathymetry, the mode trace this controller produces on the logged sensor stream, and the depth the earlier method actually flew alongside what this one would have commanded. Label the counterfactual as such in the caption.</li>
+        <li><strong>1 · The environment.</strong> Reef-slope bathymetry with the vehicle at imaging altitude inside the structure.</li>
+        <li><strong>2 · Representation.</strong> Grid to manifold to commanded-depth profile, with unobserved columns visibly flagged.</li>
+        <li><strong>3 · The manoeuvre.</strong> Commit, the unobservable span, release after tail clearance.</li>
+        <li><strong>4 · Mode graph and liveness.</strong> Two arguments in one figure — the separation of commitment from sequencing, and the absent edge that makes the zero-progress subgraph acyclic.</li>
+        <li><strong>Table I · Results.</strong> Five controllers with commitment and sequencing columns.</li>
+        <li><strong>5 · Contention.</strong> Set-based occupancy against altitude convergence as dwell increases; the dwell sweep on the same axes.</li>
+        <li><strong>6 · Real reef slope.</strong> A recorded transect: bathymetry, the mode trace on the logged sensor stream, and what the earlier method flew alongside what this one would have commanded. Label the counterfactual as such.</li>
       </ul>
-      <h3>What still does not fit</h3>
+      <h3>Not in this paper</h3>
       <ul>
-        <li><strong>Formal verification</strong> of safety and termination. Cite as future work; it deserves its own treatment.</li>
-        <li><strong>The full deployment argument.</strong> The version-pinned artifact and the vehicle/simulator/replay sharing is a paragraph in Discussion, not a section — however much it is worth in practice.</li>
+        <li><strong>Safety verification.</strong> That the command never intersects the manifold plus margin, over a stated terrain and sensor model. Deserves its own treatment; cite as future work.</li>
+        <li><strong>The full deployment argument.</strong> One version-pinned core shared by vehicle, simulator and replay is a paragraph in Discussion, not a section.</li>
       </ul>
       <h3>Use the video</h3>
-      <p>RA-L takes a supplementary video and reviewers watch them. The repository already has a browser visualizer that renders the grid, manifold, commanded-depth profile and mode against terrain in real time. A side-by-side of the deployed controller and the task-priority baseline crossing the same crest would carry the contention argument in fifteen seconds better than any figure — and it costs a screen recording, not new work.</p>
+      <p>RA-L takes a supplementary video and reviewers watch them. The repository already renders grid, manifold, commanded depth and mode against terrain in real time. A side-by-side of the deployed controller and the task-priority baseline crossing the same crest would carry the contention argument in fifteen seconds better than any figure, and it costs a screen recording.</p>
     </div>
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">11</span><h2>Limitations to state first</h2></div>
+    <div class="sec-head"><span class="num">10</span><h2>Limitations to state first</h2></div>
     <div class="body">
       <ul>
-        <li><strong>The map assumes locally straight transects.</strong> Collapsing 3-D structure into a vehicle-relative vertical slice is valid only while heading is roughly constant; the 45° staleness gate is an admission of this and should be presented as a scope condition of the representation, not a tuning knob.</li>
-        <li><strong>Single degree of freedom.</strong> The controller commands depth. It goes over, never around — and this is where task priority genuinely wins, since it absorbs additional DOF where the mode set would need redesign.</li>
-        <li><strong>Overhangs are flown over, not under.</strong> The upper envelope cannot represent them, and treats the underside as the surface. Safe, but no imagery is acquired beneath an overhang and altitude there is measured from the wrong surface. State it as a coverage bound on the method, since reef slopes genuinely contain them.</li>
-        <li><strong>One terminal state.</strong> Slopes too steep to traverse, as in §7.</li>
-        <li><strong>The test terrain is near the edge of feasibility.</strong> A 70° 20 m sawtooth permits at most ~19% time-on-altitude at 0.5 m/s, since each tooth costs about 72 s of vertical transit against 35 s of along-track. The deployed controller reaches ~40% of that ceiling. Report the ceiling alongside the result, or the absolute numbers will read as failure.</li>
+        <li><strong>The map assumes locally straight transects.</strong> The 2-D projection is valid only while heading is roughly constant; the 45° staleness gate is an admission of this and should be presented as a scope condition of the representation, not a knob.</li>
+        <li><strong>Single degree of freedom.</strong> The controller commands depth — over, never around. This is where task priority genuinely wins, absorbing additional DOF where the mode set would need redesign. Concede it.</li>
+        <li><strong>Overhangs are flown over, not under.</strong> Safe, but no imagery beneath one and altitude there is measured from the wrong surface. A coverage bound on the method.</li>
+        <li><strong>One terminal state.</strong> Slopes too steep to traverse leave the vehicle at the surface, by design, failing safe rather than commanding through terrain.</li>
+        <li><strong>The test terrain is near the edge of feasibility.</strong> A 70° 20 m sawtooth permits at most ~19% time-on-altitude at 0.5 m/s, since each tooth costs about 72 s of vertical transit against 35 s of along-track. The controller reaches ~40% of that ceiling. Report the ceiling alongside the result or the absolute numbers read as failure.</li>
       </ul>
     </div>
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">12</span><h2>Venue and anchors</h2></div>
+    <div class="sec-head"><span class="num">11</span><h2>Venue</h2></div>
     <div class="body">
-      <p><strong>Decided: RA-L with the conference option, eight pages.</strong> What follows is the inventory that decision has to survive — what is actually in hand, and what must land before submission.</p>
-    </div>
-
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Candidate contribution</th><th>State</th><th>Weight</th></tr></thead>
-        <tbody>
-          <tr><td>Sequencing/commitment contention</td>
-              <td><span class="chip chip-have">measured</span></td>
-              <td>Novel, falsifiable, carries a paper on its own</td></tr>
-          <tr><td>2-D manifold under sparse sensing</td>
-              <td><span class="chip chip-have">measured</span></td>
-              <td>Solid engineering with numbers; a design choice rather than a new algorithm</td></tr>
-          <tr><td>Threshold tuning vs priority weights</td>
-              <td><span class="chip chip-have">argued</span></td>
-              <td>Real for practitioners; discussion material, not a standalone claim</td></tr>
-          <tr><td>Dwell sweep bounding the claim</td>
-              <td><span class="chip chip-need">not run</span></td>
-              <td>Required either way — without it "necessary" is unbounded</td></tr>
-          <tr><td>Reef-slope logs + photogrammetric meshes</td>
-              <td><span class="chip chip-have">recorded</span></td>
-              <td>Extensive and metrically accurate — but flown under a different, simpler controller</td></tr>
-          <tr><td>Gazebo SITL runs on the reef reconstruction</td>
-              <td><span class="chip chip-need">not run</span></td>
-              <td>The decisive one — full stack, both controllers as their real implementations</td></tr>
-          <tr><td>Simulator fidelity against a real deployment</td>
-              <td><span class="chip chip-need">not run</span></td>
-              <td>Fly the original controller in SITL and compare with what it did in the water</td></tr>
-          <tr><td>Formal safety/termination proof</td>
-              <td><span class="chip chip-need">not run</span></td>
-              <td>Would be a substantial addition; large effort</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <div class="body">
-      <p><strong>Two rows must move before submission.</strong> The dwell sweep is not optional: without it the contention claim is unbounded and a reviewer will say so in one line. And the reef data must be converted from recorded logs into closed-loop results on reconstructed bathymetry — which is an analysis pass on data already held, not a new campaign. Everything else in the table is either done or explicitly deferred.</p>
-      <div class="claim">
-        <p>Eight pages is enough for three ordered contributions — contention, representation, deployed system evaluated on real reef terrain — but only if the third is real. Closed-loop missions over the photogrammetric reef mesh, plus open-loop mode traces on the recorded sensor streams, is what separates this from a simulation paper. Name both for what they are: neither is a closed-loop field trial, and the paper is stronger for saying so than for being caught not saying it.</p>
-      </div>
-      <p><strong>This closes the JOE path for this work.</strong> RA-L is itself a journal, so a later JOE paper on the same material would be a journal-to-journal extension rather than the usual conference-to-journal route, and would need substantial genuinely new content. The conference option supplies the talk without spending a second venue.</p>
-      <p>If the work grows past eight pages rather than fitting, the clean split is by subject and not by increment: the contention result stays at RA-L, and the representation plus an extended field campaign becomes a separate marine-venue paper on surveying rugose reef terrain under sparse sensing. Two papers that do not overlap, rather than one published twice.</p>
+      <p><strong>RA-L with the conference option, eight pages.</strong> Two legs of one claim, a credible baseline, a falsifiable mechanism and a guarantee — which is what the format rewards. Two things must land first: the dwell sweep, without which the contention claim is unbounded, and reef results converting the recorded data into closed-loop evidence.</p>
+      <p><strong>This closes the JOE path for this work.</strong> RA-L is itself a journal, so a later JOE paper would be a journal-to-journal extension needing substantial new content. If the work grows past eight pages rather than fitting, split by subject and not by increment: contention and liveness stay at RA-L, and the representation plus an extended field campaign becomes a separate marine-venue paper on surveying rugose reef terrain under sparse sensing.</p>
       <h3>Format notes</h3>
       <ul>
-        <li>RA-L review is fast but unforgiving of overclaiming. Prefer "a single priority hierarchy cannot supply both without trading one against the other, across the range we swept" to "the mode structure is necessary".</li>
-        <li>RA-L takes a supplementary video and reviewers watch them — see §10.</li>
-        <li>The over-length pages carry a fee and the allowance differs between the journal and the conference presentation option. Confirm both against the current call before planning the layout.</li>
-        <li>The deployment detail this work has — one version-pinned core shared by vehicle, simulator and replay — is worth a paragraph in Discussion and a sentence in the contributions. It is the kind of thing a marine readership values more than a controls one.</li>
+        <li>Review is fast but unforgiving of overclaiming. Prefer "a single priority hierarchy cannot supply both without trading one against the other, across the range we swept" to "the mode structure is necessary".</li>
+        <li>The liveness result is a property of the mode logic given a bounded command. State that scope in the theorem, not in a footnote.</li>
+        <li>Over-length pages carry a fee and the allowance differs between the journal and the conference option. Confirm both against the current call.</li>
       </ul>
-      <h3>Literature anchors to verify and position against</h3>
+      <h3>Literature anchors to verify</h3>
       <ul class="refs">
-        <li>Siciliano &amp; Slotine, <cite>A general framework for managing multiple tasks in highly redundant robotic systems</cite> — the task-priority formulation itself.</li>
+        <li>Siciliano &amp; Slotine, <cite>A general framework for managing multiple tasks in highly redundant robotic systems</cite> — the task-priority formulation.</li>
         <li>Antonelli, Arrichiello &amp; Chiaverini, <cite>The null-space-based behavioral control for autonomous robotic systems</cite> — the marine lineage; closest framework to the baseline.</li>
         <li>Moe, Antonelli, Teel, Pettersen &amp; Schrimpf, <cite>Set-based tasks within the singularity-robust multiple task-priority inverse kinematics framework</cite> — inequality constraints and stability; the strongest form of the baseline.</li>
         <li>Brooks, <cite>A robust layered control system for a mobile robot</cite> — the behavioural-priority ancestor a reviewer will invoke; address it directly.</li>
@@ -872,6 +732,6 @@
     </div>
   </section>
 
-  <p class="endnote">Working document for positioning, not a draft manuscript. Results are from the repository's comparison harness at 15 seeded noise realisations per condition and are reproducible with <code>python compare_controllers.py --seeds 15</code>. Parameter values are the deployed configuration at time of writing.</p>
+  <p class="endnote">Working document for positioning, not a draft manuscript. Results come from the repository's comparison harness at fifteen seeded noise realisations per condition and are reproducible with <code>python compare_controllers.py --seeds 15</code>. Timings and representation figures were measured against the deployed core on an otherwise idle machine. Parameter values are the deployed configuration at time of writing.</p>
 
 </div>

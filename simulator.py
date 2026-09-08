@@ -1117,6 +1117,7 @@ class Simulator3D:
         control_hz: float = 10.0,
         debug: bool = True,
         mapper_factory=None,
+        yaw_rate: float = 0.2,
         enable_dvl: bool = True,
         enable_altimeter: bool = True,
         enable_sonar: bool = True,
@@ -1124,6 +1125,7 @@ class Simulator3D:
         self.enable_dvl = enable_dvl
         self.enable_altimeter = enable_altimeter
         self.enable_sonar = enable_sonar
+        self.yaw_rate = yaw_rate      # rad/s for on-the-spot lawnmower turns
         # Sensor configs always kept as Python objects (used for ray simulation)
         self.dvl       = dvl_config       or DVLConfig()
         self.sonar     = sonar_config     or SonarConfig()
@@ -1321,6 +1323,32 @@ class Simulator3D:
     # Step
     # ------------------------------------------------------------------
 
+    def _yaw_in_place(self, dt: float) -> bool:
+        """Rotate on the spot toward the trajectory heading; True while turning.
+
+        A survey AUV does not carve the corner of a lawnmower — it stops, yaws,
+        runs the cross-track leg, and yaws again, so each transition is two
+        90-degree turns with no surge in between.  The trajectory is
+        parameterised by arc length and so cannot express a rotation that
+        covers no distance; this reproduces it in the kinematics instead.
+
+        Consequence worth noting for obstacle avoidance: a 90-degree yaw far
+        exceeds the stale-heading gate, so the occupancy map is invalidated
+        across the turn while the vehicle is stationary and still sensing.
+        """
+        target = self.trajectory.heading_at(
+            self.arc_length, self.vehicle_x, self.vehicle_y)
+        err = (target - self.vehicle_heading + np.pi) % (2.0 * np.pi) - np.pi
+        if abs(err) < 1e-3:
+            return False
+        max_step = self.yaw_rate * dt
+        if abs(err) <= max_step:
+            self.vehicle_heading = target
+        else:
+            self.vehicle_heading += np.sign(err) * max_step
+        self.vehicle_heading %= 2.0 * np.pi
+        return True
+
     def step(self, dt: float):
         """Advance simulation by *dt* seconds.
 
@@ -1336,10 +1364,13 @@ class Simulator3D:
           4. Fire sensors (DVL / altimeter / sonar) with current pose.
           5. Control tick (10 Hz): pass pose to mapper, query altitude + command, update vx/vz cache.
         """
-        # 1. Integrate kinematics with current cached velocity commands
+        # 1. Integrate kinematics with current cached velocity commands.
+        #    While yawing on the spot the vehicle holds station: surge is zero
+        #    and only heading changes.  Depth control continues throughout.
+        turning = self._yaw_in_place(dt)
         cos_h = np.cos(self.vehicle_heading)
         sin_h = np.sin(self.vehicle_heading)
-        step_ds = self._ctrl_vx * dt
+        step_ds = 0.0 if turning else self._ctrl_vx * dt
         if step_ds > 0:
             self.arc_length += step_ds
             self.vehicle_x  += step_ds * cos_h
@@ -1348,10 +1379,11 @@ class Simulator3D:
         self.vehicle_z  = max(0.0, self.vehicle_z)
         self.time += dt
 
-        # 2. Heading at updated position
-        self.vehicle_heading = self.trajectory.heading_at(
-            self.arc_length, self.vehicle_x, self.vehicle_y
-        )
+        # 2. Heading at updated position (held by the yaw manoeuvre if turning)
+        if not turning:
+            self.vehicle_heading = self.trajectory.heading_at(
+                self.arc_length, self.vehicle_x, self.vehicle_y
+            )
 
         # 3. Pose from updated state
         pose = self._Pose(

@@ -1,23 +1,41 @@
-"""Three-way controller comparison for the publication baseline.
+"""Controller comparison for the publication baseline.
 
 Runs the identical mission — same terrain, same trajectory, same sensor models,
 same perception stack — through three controllers and reports the metrics the
 paper needs:
 
     latch       the deployed supervisory commitment controller (C++ core)
-    tp          set-based task priority, memoryless
+    tp          set-based task priority, no controller state
     tp+dwell    set-based task priority with activation dwell, i.e. commitment
                 reintroduced inside the task-priority formalism
 
-The hypothesis under test is that `tp` collides or loses clearance on terrain
-where the obstacle stops being observable mid-maneuver, that `latch` does not,
-and that `tp+dwell` recovers most of the difference — which is the argument that
-the commitment mechanism is necessary rather than stylistic.
+Mission
+-------
+A 4-leg lawnmower flown across a 70-degree sawtooth ridge field: 20 m teeth on a
+30 m seafloor with 10 m flats between them, so the vehicle repeatedly climbs
+from 28 m to 8 m and back.  Legs run along X, the axis the teeth progress along,
+so every 40 m leg crosses roughly two and a third crests.  The turn at the end
+of each leg reverses heading, far exceeding the stale-heading gate, which wipes
+the occupancy map — that is the condition under which controller state, rather
+than map memory, is the only thing that can carry a commitment.
+
+Sweeps
+------
+`--sweep horizon` varies the map's backward horizon.  The occupancy map retains
+terrain behind the vehicle, so a task-priority controller whose safety task
+scans the tail band is not memoryless in the way a purely reactive controller
+would be.  Shortening the backward horizon removes that map memory and isolates
+the contribution of controller state.
+
+`--sweep speed` varies survey speed against a fixed vertical speed.  When the
+vehicle climbs as fast as it advances the tail-clearance geometry is never
+tight; the hazard should appear as forward speed outruns depth rate.
 
 Usage:
-    python compare_controllers.py                 # all terrains
-    python compare_controllers.py --terrain step  # one
-    python compare_controllers.py --csv out.csv
+    python compare_controllers.py
+    python compare_controllers.py --sweep horizon
+    python compare_controllers.py --sweep speed
+    python compare_controllers.py --sweep all --csv results.csv
 """
 
 import argparse
@@ -28,11 +46,52 @@ import sys
 import numpy as np
 
 import occupancy_map_cpp as cpp
-from simulator import Simulator, make_terrain
+from simulator import (
+    Simulator3D,
+    make_terrain_3d_sawtooth,
+    make_lawnmower_trajectory,
+)
 from task_priority_baseline import TaskPriorityMapper
 
 
-# ── controllers under test ───────────────────────────────────────────────────
+# -- mission definition ------------------------------------------------------
+
+SAWTOOTH = dict(
+    slope_angle_deg=70.0,   # near-vertical gradual edge
+    amplitude=20.0,         # peak-to-trough height
+    base_depth=30.0,        # seafloor at the trough
+    flat_bottom=10.0,       # flat run between teeth
+    orientation_deg=0.0,    # teeth progress along +X
+)
+
+LAWNMOWER = dict(
+    leg_length=40.0,
+    spacing=2.0,
+    n_legs=4,
+    orientation_deg=0.0,    # legs along X - across the teeth
+)
+
+# The vehicle launches at the surface and descends onto the terrain, as it does
+# on a real deployment.  The descent is excluded from the metrics below: it says
+# nothing about obstacle avoidance and its clearance and altitude error would
+# otherwise dominate every statistic.
+START_DEPTH = 0.0
+
+
+def build_mission(survey_speed):
+    terrain = make_terrain_3d_sawtooth(**SAWTOOTH)
+    # turn_rate=0 gives square corners rather than carved arcs, so each leg
+    # transition is two 90-degree heading changes with a straight cross-track
+    # run between them.  Simulator3D executes those as on-the-spot yaws: the
+    # vehicle holds station, turns, runs the spacing, turns again.  Arc corners
+    # would instead keep surging through the turn and would silently widen the
+    # pattern whenever the radius exceeded half the leg spacing.
+    traj, path_xy = make_lawnmower_trajectory(
+        survey_speed=survey_speed, turn_rate=0.0, **LAWNMOWER)
+    return terrain, traj, path_xy
+
+
+# -- controllers under test --------------------------------------------------
 
 def latch_factory(cfg, dvl, sonar, alt):
     return cpp.ObstacleMapper(cfg, dvl, sonar, alt)
@@ -53,124 +112,157 @@ CONTROLLERS = {
 }
 
 
-# ── metrics ──────────────────────────────────────────────────────────────────
+# -- run + metrics -----------------------------------------------------------
 
-def run(controller, terrain_fn, steps, dt, initial_depth, cfg):
-    sim = Simulator(
+def run(controller, cfg, dt=0.1, margin_s=120.0):
+    """Fly the whole lawnmower; return clearance / altitude / transition stats."""
+    terrain, traj, _ = build_mission(cfg.survey_speed)
+    sim = Simulator3D(
         omap_config=cfg,
-        terrain_fn=terrain_fn,
-        initial_depth=initial_depth,
+        terrain_fn=terrain,
+        trajectory=traj,
+        initial_depth=START_DEPTH,
         debug=False,
         mapper_factory=CONTROLLERS[controller],
     )
-    clearance, alt_err, modes = [], [], []
-    collided = False
-    first_collision_x = math.nan
+
+    path_len = (LAWNMOWER['leg_length'] * LAWNMOWER['n_legs']
+                + LAWNMOWER['spacing'] * (LAWNMOWER['n_legs'] - 1))
+    # Path time, plus the descent from the surface, plus margin for the in-place
+    # ascents during which the vehicle holds station.
+    descent_s = SAWTOOTH['base_depth'] / max(cfg.vertical_speed, 1e-6)
+    steps = int((path_len / max(cfg.survey_speed, 1e-6) + descent_s + margin_s) / dt)
+
     half = cfg.vehicle_length / 2.0
-    # Sample across the whole hull, not just the origin.  A tail collision is
-    # precisely the case where the nadir reading looks fine while the stern is
-    # in the terrain, so an origin-only metric cannot see the failure under test.
     offsets = np.linspace(-half, half, 9)
+
+    clearance, alt_err, modes = [], [], []
+    collided, first_collision = False, math.nan
+    on_survey = False
+    descent_steps = 0
 
     for _ in range(steps):
         sim.step(dt)
-        hull = np.array([terrain_fn(sim.vehicle_x + o) for o in offsets], dtype=float)
-        clr = float(np.min(hull - sim.vehicle_z))     # worst point on the hull
-        nadir = terrain_fn(sim.vehicle_x) - sim.vehicle_z
+        h = getattr(sim, 'vehicle_heading', 0.0)
+        ch, sh = math.cos(h), math.sin(h)
+        # Sample the whole hull along the heading axis.  A tail strike is exactly
+        # the case where the nadir reading looks fine while the stern is in
+        # terrain, so an origin-only metric cannot see the failure under test.
+        hull = np.array([terrain(sim.vehicle_x + o * ch, sim.vehicle_y + o * sh)
+                         for o in offsets], dtype=float)
+        clr = float(np.min(hull - sim.vehicle_z))
+        nadir = terrain(sim.vehicle_x, sim.vehicle_y) - sim.vehicle_z
+
+        # Metrics start once the vehicle has first descended onto survey
+        # altitude; everything before that is the launch transit.
+        if not on_survey:
+            descent_steps += 1
+            if np.isfinite(nadir) and nadir <= cfg.imaging_altitude + 1.0:
+                on_survey = True
+            continue
 
         clearance.append(clr)
         if np.isfinite(nadir):
             alt_err.append(nadir - cfg.imaging_altitude)
         if clr <= 0.0 and not collided:
-            collided = True
-            first_collision_x = sim.vehicle_x
+            collided, first_collision = True, float(getattr(sim, 'arc_length', math.nan))
         mode = getattr(sim.mapper, 'control_mode', None) or sim.mapper.omap.control_mode
         modes.append(mode)
 
-    transitions = sum(1 for a, b in zip(modes, modes[1:]) if a != b)
-    clearance = np.array(clearance, dtype=float)
+    if not clearance:
+        return {'controller': controller, 'min_clearance': math.nan,
+                'p05_clearance': math.nan, 'alt_rms': math.nan, 'collided': False,
+                'collision_s': math.nan, 'breaches': 0, 'transitions': 0,
+                'steps': steps, 'descent_s': descent_steps * dt,
+                'note': 'never reached survey altitude'}
+    clearance = np.asarray(clearance, dtype=float)
     return {
+        'descent_s':     descent_steps * dt,
         'controller':    controller,
         'min_clearance': float(np.nanmin(clearance)),
-        'mean_clearance': float(np.nanmean(clearance)),
+        'p05_clearance': float(np.nanpercentile(clearance, 5)),
         'alt_rms':       float(np.sqrt(np.mean(np.square(alt_err)))) if alt_err else math.nan,
         'collided':      collided,
-        'collision_x':   first_collision_x,
-        'transitions':   transitions,
-        'distance_m':    float(sim.vehicle_x),
+        'collision_s':   first_collision,
+        'breaches':      int(np.sum(clearance < 0.5)),
+        'transitions':   sum(1 for a, b in zip(modes, modes[1:]) if a != b),
+        'steps':         steps,
     }
 
 
-# ── terrains ─────────────────────────────────────────────────────────────────
+def header(title):
+    print(f"\n{title}")
+    print(f"  {'controller':<10} {'min clr':>8} {'p05 clr':>8} {'alt rms':>8} "
+          f"{'<0.5m':>6} {'trans':>6} {'collision':>11}")
+    print(f"  {'-'*10} {'-'*8} {'-'*8} {'-'*8} {'-'*6} {'-'*6} {'-'*11}")
 
-def build_terrains():
-    """Scenarios from the simulator's own terrain library.
+def show(r):
+    coll = f"s={r['collision_s']:.0f}m" if r['collided'] else "-"
+    print(f"  {r['controller']:<10} {r['min_clearance']:8.3f} {r['p05_clearance']:8.3f} "
+          f"{r['alt_rms']:8.3f} {r['breaches']:6d} {r['transitions']:6d} {coll:>11}")
 
-    `sawtooth` is the occlusion case, and it is the reason the library already
-    has it: each tooth rises to a crest and then drops away vertically.  The
-    moment the crest passes behind the nose the forward window sees open water,
-    while the stern is still over the edge — descend now and the tail catches.
-    Because the pattern repeats, every run aggregates many crossings rather than
-    resting on a single event.
 
-    `sawtooth-rev` mirrors it: a vertical wall to climb, then a descending
-    slope.  The hazard is on approach rather than departure, so a reactive
-    controller has the obstacle in view throughout and should do comparatively
-    well — included so the comparison shows where task priority is adequate.
+# -- sweeps ------------------------------------------------------------------
 
-    `default` is the library's undulating seafloor with several cliff features,
-    as a mixed, less contrived case.
+def sweep_none(rows):
+    cfg = cpp.OccupancyMapConfig()
+    header(f"nominal  (horizon_back {cfg.horizon_back:g} m, survey {cfg.survey_speed:g} m/s)")
+    for ctrl in CONTROLLERS:
+        r = run(ctrl, cfg); r['sweep'], r['value'] = 'nominal', 0.0
+        rows.append(r); show(r)
 
-    Each entry is (terrain_fn, initial_depth).
-    """
-    return {
-        'default':      (make_terrain('default'), 18.0),
-        'sawtooth':     (make_terrain('sawtooth', slope_angle_deg=30.0, amplitude=8.0,
-                                      base_depth=20.0, flat_bottom=6.0), 18.0),
-        'sawtooth-rev': (make_terrain('sawtooth', slope_angle_deg=30.0, amplitude=8.0,
-                                      base_depth=20.0, flat_bottom=6.0, reverse=True), 18.0),
-    }
+def sweep_horizon(rows):
+    """Backward horizon controls how much terrain the map remembers behind."""
+    for hb in (15.0, 8.0, 4.0, 2.0):
+        cfg = cpp.OccupancyMapConfig(); cfg.horizon_back = hb
+        header(f"backward horizon {hb:g} m")
+        for ctrl in CONTROLLERS:
+            r = run(ctrl, cfg); r['sweep'], r['value'] = 'horizon', hb
+            rows.append(r); show(r)
+
+def sweep_speed(rows):
+    """Forward speed against a fixed depth rate tightens the tail geometry."""
+    for vx in (0.5, 1.0, 1.5, 2.0):
+        cfg = cpp.OccupancyMapConfig(); cfg.survey_speed = vx
+        header(f"survey speed {vx:g} m/s  (vertical speed {cfg.vertical_speed:g} m/s)")
+        for ctrl in CONTROLLERS:
+            r = run(ctrl, cfg); r['sweep'], r['value'] = 'speed', vx
+            rows.append(r); show(r)
+
+SWEEPS = {'none': sweep_none, 'horizon': sweep_horizon, 'speed': sweep_speed}
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--terrain', choices=sorted(build_terrains()) + ['all'], default='all')
-    ap.add_argument('--steps', type=int, default=1400)
-    ap.add_argument('--dt', type=float, default=0.1)
-    ap.add_argument('--csv', metavar='PATH', help='also write the results as CSV')
+    ap.add_argument('--sweep', choices=sorted(SWEEPS) + ['all'], default='none')
+    ap.add_argument('--csv', metavar='PATH')
     args = ap.parse_args()
 
     cfg = cpp.OccupancyMapConfig()
-    terrains = build_terrains()
-    names = sorted(terrains) if args.terrain == 'all' else [args.terrain]
+    print(f"mission: {LAWNMOWER['n_legs']} legs x {LAWNMOWER['leg_length']:g} m, "
+          f"{LAWNMOWER['spacing']:g} m spacing, legs across the teeth")
+    print(f"terrain: {SAWTOOTH['slope_angle_deg']:g} deg sawtooth, "
+          f"{SAWTOOTH['amplitude']:g} m teeth on a {SAWTOOTH['base_depth']:g} m floor, "
+          f"{SAWTOOTH['flat_bottom']:g} m flats "
+          f"(crest at {SAWTOOTH['base_depth'] - SAWTOOTH['amplitude']:g} m)")
+    print(f"imaging altitude {cfg.imaging_altitude:g} m, "
+          f"stale-heading gate {cfg.stale_heading_threshold_deg:g} deg")
 
     rows = []
-    for name in names:
-        terrain_fn, z0 = terrains[name]
-        print(f"\n{name}  ({args.steps} steps @ {args.dt}s, imaging altitude "
-              f"{cfg.imaging_altitude:g} m)")
-        print(f"  {'controller':<10} {'min clr':>8} {'alt rms':>8} "
-              f"{'trans':>6} {'collision':>10}")
-        print(f"  {'-'*10} {'-'*8:>8} {'-'*8:>8} {'-'*6:>6} {'-'*10:>10}")
-        for ctrl in CONTROLLERS:
-            r = run(ctrl, terrain_fn, args.steps, args.dt, z0, cfg)
-            r['terrain'] = name
-            rows.append(r)
-            coll = f"x={r['collision_x']:.1f}m" if r['collided'] else "—"
-            print(f"  {ctrl:<10} {r['min_clearance']:8.3f} {r['alt_rms']:8.3f} "
-                  f"{r['transitions']:6d} {coll:>10}")
+    for n in (sorted(SWEEPS) if args.sweep == 'all' else [args.sweep]):
+        SWEEPS[n](rows)
 
     if args.csv:
         with open(args.csv, 'w', newline='') as fh:
             w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
-            w.writeheader()
-            w.writerows(rows)
+            w.writeheader(); w.writerows(rows)
         print(f"\nwrote {args.csv}")
 
-    print("\nmin clr = minimum terrain clearance (m); <= 0 is a collision.")
+    print("\nmin clr = worst clearance over the hull (m); <= 0 is a collision.")
+    print("p05 clr = 5th-percentile hull clearance - how close it runs habitually.")
+    print("<0.5m   = control cycles spent inside half a metre of terrain.")
     print("alt rms = RMS deviation from the imaging altitude (m).")
-    print("trans   = controller mode / task activation changes.")
     return 0
 
 

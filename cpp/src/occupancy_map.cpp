@@ -912,7 +912,6 @@ ObstacleMapper::ObstacleMapper(
     , last_pose_(std::nullopt)
     , altimeter_altitude_(kNaN)
 {
-    omap_.cfg().dvl_max_range_m = dvl_config_.max_range;
 }
 
 void ObstacleMapper::reset(const Pose& pose) {

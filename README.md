@@ -230,6 +230,42 @@ depth_error = cmd_depth - vehicle_depth
 | `dvl_hit_prob` | 0.14 | DVL occupancy increment on hit |
 | `sonar_hit_prob` | 0.04 | Sonar occupancy increment (lower — noisier) |
 
+### Sensor adaptation: who decides a beam is valid
+
+`ObstacleMapper` consumes `(range, hit)` per beam and nothing else.  Deciding
+whether a return is real is the **adapter's** job — the code that turns a
+specific sensor's messages into those pairs.  Each sensor states validity
+differently, so a configured max range is not a general answer:
+
+| Sensor | How a no-return is identified | Needs a configured max range? |
+|--------|-------------------------------|-------------------------------|
+| DVL (`nucleus_bottomtrack_t`) | `distance_beam_valid[i]`, plus `DISTANCE_SENTINEL = 0.0` | **No** — fully self-describing |
+| Altimeter (`nucleus_altimeter_t`) | `DISTANCE_SENTINEL = 0.0`, and `altimeter_quality` | **Not in principle** — see note below |
+| Forward sonar (`isa500_t`) | nothing — the message is only `distance` | **Yes** — the only available signal |
+
+A real sensor has already applied its own range limit, so clamping a *valid*
+return to a configured maximum invents terrain: a genuine 30 m bottom lock
+reported as a hit at 25 m is a fabricated obstacle.  `DVLConfig.max_range`
+therefore exists for the **simulator only**, where the ray-caster must generate
+no-returns itself; it is not a vehicle parameter.
+
+> **TODO — characterise `altimeter_quality`.**  The altimeter path still infers
+> a no-return by comparing the range against a configured maximum
+> (`range < max_range - 0.05`), in both `oa_mapper.cpp` and
+> `lcm_playback_visualizer.py`.  That is a stand-in for information the message
+> already carries: `nucleus_altimeter_t` provides `altimeter_quality` and a
+> documented zero sentinel.  Replacing it needs a defensible quality threshold
+> taken from logged values, which nobody has established yet — so the heuristic
+> is kept, identically, on both sides until then.  Note the current thresholds
+> differ per vehicle (`cheryl.cfg` sets `altimeter_max_range = 25`), so genuine
+> returns beyond that are presently discarded as no-returns.
+
+Both adapters must agree, or a log replay will not reproduce what the vehicle
+did.  `lcm_playback_visualizer.py` mirrors `oa_mapper.cpp` deliberately; pass
+`--sonar-max-range` / `--altimeter-max-range` to match the vehicle's
+`bot_param` values, since the tool's defaults are this repo's reference config
+rather than any particular vehicle's.
+
 ## Coordinate Conventions
 
 - **X**: Forward axis (positive ahead of vehicle)

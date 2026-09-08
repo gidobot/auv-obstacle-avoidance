@@ -83,7 +83,6 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
         .def_readwrite("dvl_miss_prob",   &OccupancyMapConfig::dvl_miss_prob)
         .def_readwrite("dvl_max_occ",     &OccupancyMapConfig::dvl_max_occ)
         .def_readwrite("dvl_min_occ",     &OccupancyMapConfig::dvl_min_occ)
-        .def_readwrite("dvl_max_range_m", &OccupancyMapConfig::dvl_max_range_m)
         // Altimeter model
         .def_readwrite("altimeter_hit_prob",  &OccupancyMapConfig::altimeter_hit_prob)
         .def_readwrite("altimeter_miss_prob", &OccupancyMapConfig::altimeter_miss_prob)

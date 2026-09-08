@@ -24,6 +24,10 @@ struct DVLConfig {
         {20.0, 120.0},
         {20.0, 240.0},
     };
+    /// Simulator-only: the ray-caster needs a cutoff at which to stop marching
+    /// and report a no-return.  A real DVL applies its own range limit and
+    /// reports per-beam validity, so vehicle-side adapters must gate on those
+    /// flags rather than on a configured maximum.
     double max_range = 50.0;
 
     /// 2-D projected angle from vertical for each beam (rad).
@@ -107,7 +111,6 @@ struct OccupancyMapConfig {
     double dvl_miss_prob  = 0.3;
     double dvl_max_occ    = 0.98;
     double dvl_min_occ    = 0.02;
-    double dvl_max_range_m = 50.0;
 
     // Altimeter observation model
     double altimeter_hit_prob  = 0.5;

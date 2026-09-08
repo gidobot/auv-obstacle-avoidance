@@ -534,6 +534,8 @@ class PlaybackServer:
         swap_xy: bool = False,
         use_cpp_backend: bool = False,
         lcm_types_path: str = _DEFAULT_LCM_TYPES_PATH,
+        sonar_max_range: Optional[float] = None,
+        altimeter_max_range: Optional[float] = None,
     ):
         self.events = events
         self.vehicle_name = vehicle_name
@@ -581,9 +583,15 @@ class PlaybackServer:
             except ImportError:
                 use_cpp_backend = False
                 print("C++ backend unavailable, falling back to Python")
-        # Sonar/altimeter configs kept as Python objects for threshold checks
-        self._sonar_max_range = SonarConfig().max_range
-        self._alt_max_range   = AltimeterConfig().max_range
+        # Sonar/altimeter configs kept as Python objects for threshold checks.
+        # These must match the vehicle's bot_param values (e.g. cheryl.cfg
+        # sonar_max_range / altimeter_max_range) or playback will classify
+        # no-returns differently than the vehicle did — the defaults here are
+        # the reference config, not any particular vehicle's.
+        self._sonar_max_range = (sonar_max_range if sonar_max_range is not None
+                                 else SonarConfig().max_range)
+        self._alt_max_range   = (altimeter_max_range if altimeter_max_range is not None
+                                 else AltimeterConfig().max_range)
 
         if not use_cpp_backend:
             self.mapper = ObstacleMapper(
@@ -766,8 +774,13 @@ class PlaybackServer:
             n = min(len(msg.distance_beam), len(self._dvl_cfg.beams))
             ranges = np.array(msg.distance_beam[:n], dtype=float)
             valid = np.array(msg.distance_beam_valid[:n], dtype=bool)
-            # Sentinel: distance == 0.0 means invalid even if flag not set
-            valid &= ranges > 0.0
+            # Must match oa_mapper.cpp's gating exactly, or playback does not
+            # reproduce what the vehicle did.  distance_beam_valid plus the
+            # DISTANCE_SENTINEL (0.0) fully describe validity; the sensor has
+            # already applied its own range limit, so nothing is clamped here.
+            usable = np.isfinite(ranges) & (ranges > 0.0)
+            valid &= usable
+            ranges = np.where(usable, ranges, 0.0)
             pose = self._Pose(north=self._nav_x, east=self._nav_y,
                              depth=self._nav_depth, heading=self._nav_heading)
             self.mapper.update_sensor(
@@ -797,12 +810,20 @@ class PlaybackServer:
         elif suffix == 'NUCLEUS.ALTIMETER' and self._initialized:
             msg = self._alt_t.decode(raw)
             dist = msg.altimeter_distance
-            hit = dist > 0.0 and dist < self._alt_max_range - 0.05
+            # Mirrors oa_mapper.cpp.  TODO: nucleus_altimeter_t carries
+            # altimeter_quality and a documented DISTANCE_SENTINEL (0.0); this
+            # max-range comparison is a stand-in for data the message already
+            # provides.  Replace both sides together once a quality threshold
+            # has been established from logged values.
+            dist_ok = np.isfinite(dist) and dist > 0.0
+            hit = dist_ok and dist < self._alt_max_range - 0.05
             pose = self._Pose(north=self._nav_x, east=self._nav_y,
                              depth=self._nav_depth, heading=self._nav_heading)
             self.mapper.update_sensor(
                 self._SensorType.ALTIMETER,
-                self._AltimeterMeasurement(range_m=dist if dist > 0 else 1.0, hit=hit),
+                self._AltimeterMeasurement(
+                    range_m=min(dist, self._alt_max_range) if dist_ok else 1.0,
+                    hit=hit),
                 pose,
             )
             # Rasterise altimeter hit — straight-down return at vehicle position
@@ -814,12 +835,17 @@ class PlaybackServer:
             msg = self._isa_t.decode(raw)
             dist = msg.distance
             max_r = self._sonar_max_range
-            hit = 0.0 < dist < max_r - 0.1
+            # Mirrors oa_mapper.cpp.  isa500_t carries only `distance` — no
+            # validity flag and no sentinel — so max range is genuinely the
+            # only way to infer a no-return here.
+            dist_ok = np.isfinite(dist) and dist > 0.0
+            hit = dist_ok and dist < max_r - 0.1
             pose = self._Pose(north=self._nav_x, east=self._nav_y,
                              depth=self._nav_depth, heading=self._nav_heading)
             self.mapper.update_sensor(
                 self._SensorType.SONAR,
-                self._SonarMeasurement(range_m=dist if dist > 0 else max_r, hit=hit),
+                self._SonarMeasurement(
+                    range_m=min(dist, max_r) if dist_ok else max_r, hit=hit),
                 pose,
             )
             self._sonar_hit_xy = _sonar_hit_xy(
@@ -1289,6 +1315,14 @@ def main() -> None:
     parser.add_argument('--lcm-types-path', default=_DEFAULT_LCM_TYPES_PATH,
                         metavar='PATH',
                         help='Path to directory containing perls/lcmtypes package')
+    parser.add_argument('--sonar-max-range', type=float, metavar='M',
+                        help="Sonar max range (m) used to classify no-returns. Set this to "
+                             "the vehicle's oa-mapper sonar_max_range so playback matches "
+                             "what the vehicle did (cheryl.cfg: 20, seeker-sitl.cfg: 100)")
+    parser.add_argument('--altimeter-max-range', type=float, metavar='M',
+                        help="Altimeter max range (m) used to classify no-returns. Set this "
+                             "to the vehicle's oa-mapper altimeter_max_range (cheryl.cfg and "
+                             "seeker-sitl.cfg: 25)")
     args = parser.parse_args()
 
     _ensure_lcm_path(args.lcm_types_path)
@@ -1340,6 +1374,8 @@ def main() -> None:
         swap_xy=args.swap_xy,
         use_cpp_backend=args.use_cpp,
         lcm_types_path=args.lcm_types_path,
+        sonar_max_range=args.sonar_max_range,
+        altimeter_max_range=args.altimeter_max_range,
     )
 
     asyncio.run(server.start())

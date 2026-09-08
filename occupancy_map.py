@@ -92,6 +92,10 @@ class DVLConfig:
         (20.0, 120.0),   # beam 2: right-rear-down
         (20.0, 240.0),   # beam 3: left-rear-down
     ])
+    # Simulator-only: the ray-caster needs a cutoff at which to stop marching
+    # and report a no-return.  A real DVL applies its own range limit and
+    # reports per-beam validity, so vehicle-side adapters must gate on those
+    # flags rather than on a configured maximum.
     max_range: float = 50.0
 
     @property
@@ -293,9 +297,6 @@ class OccupancyMapConfig:
     dvl_miss_prob: float = 0.3    # P(free | miss) decrement
     dvl_max_occ: float = 0.98     # Max occupancy from DVL
     dvl_min_occ: float = 0.02     # Min occupancy from DVL
-    # Instrument max range (m): nadir fallback in update_dvl_ray when range
-    # is clearly not a max-range miss but hit flags are all false.
-    dvl_max_range_m: float = 50.0
 
     # Altimeter observation model
     altimeter_hit_prob: float = 0.5   # P(occupied | hit) increment
@@ -605,11 +606,11 @@ class OccupancyMap:
 
             dvl_altitude = min( range_i * cos(angle_i) )   for hit beams
 
-        If no beam records a valid bottom return (all misses within max range),
-        ``self.dvl_altitude`` is set to ``NaN`` so planners do not reuse a stale
-        altitude from a previous cycle — unless the nadir (beam 0) range is
-        below ``cfg.dvl_max_range_m`` (minus a small margin), in which case it
-        is still used as a bottom return when hit flags are untrusted.
+        If no beam records a valid bottom return, ``self.dvl_altitude`` is set
+        to ``NaN`` so planners do not reuse a stale altitude from a previous
+        cycle.  Beam validity comes entirely from ``hit_surface`` — the caller's
+        adapter is responsible for translating its sensor's own no-return
+        convention into that flag.
 
         This is the shortest terrain clearance observed by any beam, measured
         along the depth axis.  The altimeter (angle=0) contributes directly;
@@ -1487,7 +1488,6 @@ class ObstacleMapper:
         self._lock = threading.Lock()
         self._last_pose: Optional[Pose] = None
         self._altimeter_altitude: float = np.nan
-        self._omap.cfg.dvl_max_range_m = dvl_config.max_range
 
     @property
     def omap(self) -> OccupancyMap:

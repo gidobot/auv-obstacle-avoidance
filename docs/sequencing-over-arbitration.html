@@ -286,7 +286,7 @@
     <div class="meta">
       <span><b>Platform</b> ACFR seafloor-imaging AUV</span>
       <span><b>Implementation</b> auv_oavoid / oa-mapper</span>
-      <span><b>Target</b> RA-L with conference option</span>
+      <span><b>Target</b> RA-L + conference, 8 pp</span>
       <span><b>Status</b> results in hand, pre-submission</span>
     </div>
   </header>
@@ -299,7 +299,7 @@
         <p>Holding a survey altitude over rugose terrain requires <em>temporal sequencing</em> — halting translation until the vertical task has converged, then advancing — and requires <em>commitment</em> through a manoeuvre for safety. Task-priority control can be given either, but expresses both through the same channel: which task is currently active. Holding a set-based task active for commitment directly consumes the time the altitude task needs to converge. The two contend. A supervisory structure separates them, and only the separated design achieves both.</p>
       </div>
       <p>The contribution is therefore not "a state machine for AUV altitude control", which is well-trodden. It is the identification of two requirements that a single priority hierarchy cannot satisfy simultaneously, demonstrated by building the hierarchy, adding each mechanism, and measuring where it fails.</p>
-      <p>The vehicle-relative 2-D manifold underpins this: it is what makes planning possible under the platform's sensing budget at all, and it is cheap enough to run inside the vehicle's own node. At RA-L length it is supporting method rather than a co-equal claim — see §3 and the structure note in §9.</p>
+      <p>At eight pages three contributions fit, provided they are ordered rather than balanced. The contention result leads. The vehicle-relative 2-D manifold is the second — it is what makes planning possible under the platform's sensing budget at all, and it is cheap enough to run inside the vehicle's own node (§3). The third is the deployed system itself: one version-pinned core flying on the vehicle, driving the simulator, and replaying field logs, with in-water validation on reef terrain.</p>
     </div>
   </section>
 
@@ -516,9 +516,21 @@
       <ul>
         <li><span class="chip chip-need">do</span> <strong>Sweep the dwell duration.</strong> §5 predicts no setting escapes the trade-off. If one does, the necessity claim is wrong and the paper changes. This is the single most important remaining experiment.</li>
         <li><span class="chip chip-need">do</span> <strong>Formal model and check</strong> for the safety and termination properties.</li>
-        <li><span class="chip chip-need">do</span> <strong>Field results</strong> on the real vehicle over comparable terrain, replayed through the same metrics.</li>
+        <li><span class="chip chip-need">do</span> <strong>Export reef bathymetry from the logs.</strong> The playback tool already rasterises every DVL, altimeter and sonar return into a 2.5-D height map, keeping the shallowest depth per cell. The simulator has an OBJ/heightmap exporter; the playback server does not expose one. Closing that gap turns recorded reef slopes into a terrain function and makes tier 2 below possible — a small piece of work for the largest gain in the paper.</li>
         <li><span class="chip chip-need">do</span> <strong>A cliff regression case that validates rather than detects.</strong> The current one is degenerate: past the step the vehicle sits below the surface and the caster hits on every beam.</li>
       </ul>
+      <h3>Three tiers of evidence, and what each may claim</h3>
+      <p>The field data is extensive and from genuinely complex reef slopes, but the vehicle flew a different and much simpler avoidance method at the time. That constrains what replay can support, and the constraint should be stated before a reviewer states it.</p>
+      <ul>
+        <li><strong>Tier 1 — closed loop, synthetic terrain.</strong> <span class="chip chip-have">have</span> The parameterised sawtooth: controlled, repeatable, sweepable, and the only tier where the controllers can be made to differ under identical conditions. It cannot speak to real structure.</li>
+        <li><strong>Tier 2 — closed loop, reconstructed reef bathymetry.</strong> <span class="chip chip-need">do</span> Export the height map built from the logs, load it as the simulator's terrain function, re-run the comparison. Real geometry and real rugosity with closed-loop numbers. This is the strongest evidence available without a new campaign, and the tooling is most of the way there.</li>
+        <li><strong>Tier 3 — open-loop replay, recorded sensor streams.</strong> <span class="chip chip-have">have</span> The algorithm consuming real DVL, altimeter and sonar returns along the real trajectory. Demonstrates the perception stack on real reef data, produces interpretable mode traces against real bathymetry, and supports a per-cycle counterfactual: given this recorded state, what would the controller have commanded, and how does that differ from what flew.</li>
+      </ul>
+      <div class="claim">
+        <p>Replay is open loop. The vehicle followed the earlier controller, so the recorded trajectory is not the one this controller would have flown, and the map depends on where the vehicle went. A claim about a single cycle — <em>given this state, it would have commanded a climb</em> — is sound. A claim about a trajectory — <em>it would have avoided this</em> — is not, beyond the horizon over which the two controllers agree. Quantify that horizon and report it rather than letting a reviewer ask.</p>
+      </div>
+      <p>The weak method that actually flew is an asset rather than an embarrassment: it is a real-world baseline with a real outcome. Where it lost altitude or closed on terrain, the per-cycle counterfactual shows what this controller would have commanded at that same state — which is exactly the defensible form of the claim, and more persuasive on real reef slopes than any synthetic scenario.</p>
+
       <h3>Disclose</h3>
       <ul>
         <li><span class="chip chip-gap">gap</span> The altimeter no-return test compares range against a configured maximum, standing in for the quality field and zero sentinel the message already carries.</li>
@@ -531,40 +543,57 @@
   <section>
     <div class="sec-head"><span class="num">09</span><h2>Proposed structure</h2></div>
     <div class="body">
-      <p>This is the RA-L cut. Six pages plus an optional seventh will not carry three co-equal contributions, so one claim leads and the rest becomes supporting method. At JOE length none of these cuts apply — see §11 for which venue the work actually warrants.</p>
+      <p>Eight pages — the six-page RA-L base plus the two over-length pages — with the conference option for the talk. That is roughly two pages more than the minimum cut, and the right place to spend them is the representation and the results, not a longer introduction. Verify the current page and fee rules against the call; they move.</p>
     </div>
     <ol class="outline">
       <li><span class="o-num">I</span><div>
-        <p class="o-title">Introduction</p>
-        <p class="o-note">Reef-slope survey at fixed imaging altitude; rugosity as a continuous hazard rather than isolated obstacles. State the contention result as <em>the</em> contribution in the first column, with a three-line contribution list.</p>
+        <p class="o-title">Introduction · ~1 pp</p>
+        <p class="o-note">Reef-slope survey at fixed imaging altitude; rugosity as a continuous hazard rather than isolated obstacles. Contributions as three ordered bullets, contention first.</p>
       </div></li>
       <li><span class="o-num">II</span><div>
-        <p class="o-title">Related work</p>
-        <p class="o-note">Task-priority and null-space control in marine robotics, set-based tasks, reactive avoidance, underwater occupancy/elevation mapping. Tight — half a column at RA-L length.</p>
+        <p class="o-title">Related work · ~0.75 pp</p>
+        <p class="o-note">Task-priority and null-space control in marine robotics, set-based tasks, reactive avoidance, underwater occupancy and elevation mapping. Position against arbitration, not against mapping.</p>
       </div></li>
       <li><span class="o-num">III</span><div>
-        <p class="o-title">Method: representation and controller</p>
-        <p class="o-note">One section, not two. The manifold as the enabling choice for sparse sensing, compressed to a figure and the cell/memory/timing numbers; then the mode set, priority order and the latch, with the separation of commitment from sequencing made explicit. This is where the page pressure bites.</p>
+        <p class="o-title">Representation: the cliff manifold · ~1.25 pp</p>
+        <p class="o-note">Its own section at this length. The sensing budget makes a volumetric map unfillable; the projection is what makes five rays per cycle sufficient. Cell count, memory, 21 µs pipeline, observed-column fraction, observed-versus-inferred flagging, and overhangs traversed above rather than under.</p>
       </div></li>
       <li><span class="o-num">IV</span><div>
-        <p class="o-title">Baseline construction</p>
-        <p class="o-note">The set-based task-priority controller, its reduction to strict priority in one DOF, and the two additions. Short, but do not cut it — it is what makes the comparison credible rather than a straw man.</p>
+        <p class="o-title">Supervisory controller · ~1.25 pp</p>
+        <p class="o-note">Mode set, priority order, the latch with its monotone ratchets and release conditions, and the vehicle-column rule taking the most conservative available source. Present as a hybrid automaton, with the separation of commitment from sequencing made explicit — this is what the results then test.</p>
       </div></li>
       <li><span class="o-num">V</span><div>
-        <p class="o-title">Results</p>
-        <p class="o-note">The five-controller table, the contention mechanism, the dwell sweep, and field results. Headline: sequencing carries the mission, commitment carries safety, one channel cannot carry both.</p>
+        <p class="o-title">Task-priority baseline · ~0.75 pp</p>
+        <p class="o-note">Construction, the reduction to strict priority in one DOF, and the two additions as independent switches. Short but load-bearing: it is what makes the comparison credible rather than a straw man.</p>
       </div></li>
       <li><span class="o-num">VI</span><div>
-        <p class="o-title">Discussion and conclusion</p>
-        <p class="o-note">Threshold tuning versus priority weighting, the terrain-imposed ceiling, and limitations. Compress §6 to a paragraph here.</p>
+        <p class="o-title">Experiments and results · ~2.5 pp</p>
+        <p class="o-note">Mission and metric definition, the five-controller table, the contention mechanism, the dwell sweep, and field results on reef terrain. Headline: sequencing carries the mission, commitment carries safety, one channel cannot carry both.</p>
+      </div></li>
+      <li><span class="o-num">VII</span><div>
+        <p class="o-title">Discussion · ~0.5 pp</p>
+        <p class="o-note">Threshold tuning versus priority weighting; the terrain-imposed ceiling; limitations stated plainly.</p>
+      </div></li>
+      <li><span class="o-num">VIII</span><div>
+        <p class="o-title">Conclusion · ~0.25 pp</p>
       </div></li>
     </ol>
     <div class="body">
-      <h3>What moves out</h3>
+      <h3>Figure budget</h3>
+      <p>Six figures and one table is about right for eight pages. Every one should carry an argument rather than illustrate the system.</p>
       <ul>
-        <li><strong>Formal verification</strong> of the safety and termination properties. Too much for six pages, and it deserves its own treatment. Cite as future work or hold for the extended version.</li>
-        <li><strong>The full deployment-properties argument.</strong> One paragraph in Discussion, not a section.</li>
-        <li><strong>The representation as a co-equal claim.</strong> It becomes method. If it will not compress, it is a separate paper — it would stand on its own for a marine venue.</li>
+        <li><strong>1 · The environment.</strong> Reef-slope bathymetry with the vehicle at imaging altitude inside the structure. Establishes that the hazard is continuous.</li>
+        <li><strong>2 · Representation.</strong> Occupancy grid to manifold to commanded-depth profile, one panel each, with the unobserved columns visibly flagged.</li>
+        <li><strong>3 · The manoeuvre.</strong> The depth-profile figure: commit, the unobservable span, release after tail clearance.</li>
+        <li><strong>4 · Mode structure.</strong> The hybrid automaton, with the commitment and sequencing paths drawn as separate channels — this figure <em>is</em> the argument.</li>
+        <li><strong>Table I · Results.</strong> Five controllers, commitment and sequencing columns, time-on-altitude, clearance, collisions.</li>
+        <li><strong>5 · Contention.</strong> Set-based occupancy against altitude convergence as dwell increases; the dwell sweep on the same axes. The mechanism made visible.</li>
+        <li><strong>6 · Real reef slope.</strong> A recorded transect: reconstructed bathymetry, the mode trace this controller produces on the logged sensor stream, and the depth the earlier method actually flew alongside what this one would have commanded. Label the counterfactual as such in the caption.</li>
+      </ul>
+      <h3>What still does not fit</h3>
+      <ul>
+        <li><strong>Formal verification</strong> of safety and termination. Cite as future work; it deserves its own treatment.</li>
+        <li><strong>The full deployment argument.</strong> The version-pinned artifact and the vehicle/simulator/replay sharing is a paragraph in Discussion, not a section — however much it is worth in practice.</li>
       </ul>
       <h3>Use the video</h3>
       <p>RA-L takes a supplementary video and reviewers watch them. The repository already has a browser visualizer that renders the grid, manifold, commanded-depth profile and mode against terrain in real time. A side-by-side of the deployed controller and the task-priority baseline crossing the same crest would carry the contention argument in fifteen seconds better than any figure — and it costs a screen recording, not new work.</p>
@@ -587,7 +616,7 @@
   <section>
     <div class="sec-head"><span class="num">11</span><h2>Venue and anchors</h2></div>
     <div class="body">
-      <p>The question is not which venue would accept this, but which one the contributions currently warrant. An honest inventory:</p>
+      <p><strong>Decided: RA-L with the conference option, eight pages.</strong> What follows is the inventory that decision has to survive — what is actually in hand, and what must land before submission.</p>
     </div>
 
     <div class="table-wrap">
@@ -606,9 +635,12 @@
           <tr><td>Dwell sweep bounding the claim</td>
               <td><span class="chip chip-need">not run</span></td>
               <td>Required either way — without it "necessary" is unbounded</td></tr>
-          <tr><td>Field results on reef terrain</td>
+          <tr><td>Reef-slope field data</td>
+              <td><span class="chip chip-have">recorded</span></td>
+              <td>Extensive, complex terrain — but flown under a different, simpler controller</td></tr>
+          <tr><td>Closed-loop runs on reconstructed reef terrain</td>
               <td><span class="chip chip-need">not run</span></td>
-              <td>The decisive one. See below</td></tr>
+              <td>The decisive one, and reachable from the data in hand. See §8</td></tr>
           <tr><td>Formal safety/termination proof</td>
               <td><span class="chip chip-need">not run</span></td>
               <td>Would be a substantial addition; large effort</td></tr>
@@ -617,18 +649,18 @@
     </div>
 
     <div class="body">
-      <p><strong>As it stands, this is RA-L-sized.</strong> One crisp finding, a credible baseline, a measured mechanism — which is what the format rewards. Two contributions plus a practitioner argument is not a full journal paper, and padding it into one would show.</p>
-      <p><strong>Field data is what converts it.</strong> A JOE paper on reef-slope survey avoidance without in-water results would be weak whatever else it contained; with them it is strong, and the remaining material — the representation at full length, the formal properties, the deployment argument, reef-terrain comparisons — then fills a journal naturally rather than by inflation. The logs and the replay apparatus already exist, so this is a campaign and an analysis pass, not new method.</p>
+      <p><strong>Two rows must move before submission.</strong> The dwell sweep is not optional: without it the contention claim is unbounded and a reviewer will say so in one line. And the reef data must be converted from recorded logs into closed-loop results on reconstructed bathymetry — which is an analysis pass on data already held, not a new campaign. Everything else in the table is either done or explicitly deferred.</p>
       <div class="claim">
-        <p>The decision reduces to one question: does a reef-slope field campaign happen before you want this published? If yes, aim at JOE and skip RA-L. If no, take RA-L now with the contention result.</p>
+        <p>Eight pages is enough for three ordered contributions — contention, representation, deployed system evaluated on real reef terrain — but only if the third is real. Closed-loop results on bathymetry reconstructed from the logs, plus open-loop mode traces on the recorded sensor streams, is what separates this from a simulation paper. Be explicit that the replay is open loop; the paper is stronger for saying so than for being caught not saying it.</p>
       </div>
-      <p><strong>Do not plan on both.</strong> RA-L is itself a journal, so a later JOE paper on the same work is a journal-to-journal extension rather than the usual conference-to-journal path, and needs substantial genuinely new content to be defensible. The conference option on RA-L gives the talk without spending a second venue.</p>
-      <p>If the split happens anyway, the clean line is by subject rather than by increment: the contention result to RA-L, and the representation plus field validation as a separate marine-venue paper on surveying rugose reef terrain under sparse sensing. Two papers that do not overlap, rather than one paper published twice.</p>
+      <p><strong>This closes the JOE path for this work.</strong> RA-L is itself a journal, so a later JOE paper on the same material would be a journal-to-journal extension rather than the usual conference-to-journal route, and would need substantial genuinely new content. The conference option supplies the talk without spending a second venue.</p>
+      <p>If the work grows past eight pages rather than fitting, the clean split is by subject and not by increment: the contention result stays at RA-L, and the representation plus an extended field campaign becomes a separate marine-venue paper on surveying rugose reef terrain under sparse sensing. Two papers that do not overlap, rather than one published twice.</p>
       <h3>Format notes</h3>
       <ul>
         <li>RA-L review is fast but unforgiving of overclaiming. Prefer "a single priority hierarchy cannot supply both without trading one against the other, across the range we swept" to "the mode structure is necessary".</li>
         <li>RA-L takes a supplementary video and reviewers watch them — see §9.</li>
-        <li>JOE expects the deployment detail this work actually has: the version-pinned artifact shared by vehicle, simulator and replay is the kind of thing that journal's readership values and a letters format has no room for.</li>
+        <li>The over-length pages carry a fee and the allowance differs between the journal and the conference presentation option. Confirm both against the current call before planning the layout.</li>
+        <li>The deployment detail this work has — one version-pinned core shared by vehicle, simulator and replay — is worth a paragraph in Discussion and a sentence in the contributions. It is the kind of thing a marine readership values more than a controls one.</li>
       </ul>
       <h3>Literature anchors to verify and position against</h3>
       <ul class="refs">

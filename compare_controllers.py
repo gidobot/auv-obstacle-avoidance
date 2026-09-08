@@ -119,11 +119,23 @@ def tp_stop_factory(cfg, dvl, sonar, alt):
     return TaskPriorityMapper(cfg, dvl, sonar, alt, dwell_s=0.0,
                               stop_to_converge=True)
 
+def tp_both_factory(cfg, dvl, sonar, alt):
+    # Both additions at once: commitment (dwell on set-based tasks) and
+    # sequencing (hold station until the altitude task converges).  This is the
+    # strongest form of the objection that the supervisory mode structure is
+    # unnecessary — if task priority plus these two rules matches the deployed
+    # controller, the mode structure is one way of writing something the
+    # formalism can also express, and the paper must say so.
+    hold = (cfg.cliff_standoff + cfg.vehicle_length) / max(cfg.survey_speed, 1e-6)
+    return TaskPriorityMapper(cfg, dvl, sonar, alt, dwell_s=hold,
+                              stop_to_converge=True)
+
 CONTROLLERS = {
-    'latch':    latch_factory,
-    'tp':       tp_factory,
-    'tp+dwell': tp_dwell_factory,
-    'tp+stop':  tp_stop_factory,
+    'latch':         latch_factory,
+    'tp':            tp_factory,
+    'tp+dwell':      tp_dwell_factory,
+    'tp+stop':       tp_stop_factory,
+    'tp+dwell+stop': tp_both_factory,
 }
 
 
@@ -255,13 +267,13 @@ def trials(controller, cfg, seeds):
 
 def header(title, n):
     print(f"\n{title}   [{n} noise seeds]")
-    print(f"  {'controller':<10} {'t@alt %':>13} {'d@alt m':>8} {'alt rms':>8} "
+    print(f"  {'controller':<14} {'t@alt %':>13} {'d@alt m':>8} {'alt rms':>8} "
           f"{'worst clr':>9} {'<0.5m':>6} {'collided':>9}")
-    print(f"  {'-'*10} {'-'*13} {'-'*8} {'-'*8} {'-'*9} {'-'*6} {'-'*9}")
+    print(f"  {'-'*14} {'-'*13} {'-'*8} {'-'*8} {'-'*9} {'-'*6} {'-'*9}")
 
 def show(r):
     coll = f"{r['collisions']}/{r['n']}" if r['collisions'] else "-"
-    print(f"  {r['controller']:<10} {r['on_alt_pct']:8.1f}+-{r['on_alt_sd']:<4.1f} "
+    print(f"  {r['controller']:<14} {r['on_alt_pct']:8.1f}+-{r['on_alt_sd']:<4.1f} "
           f"{r['dist_on_alt']:8.1f} {r['alt_rms']:8.3f} {r['min_clearance']:9.3f} "
           f"{r['breaches']:6d} {coll:>9}")
 

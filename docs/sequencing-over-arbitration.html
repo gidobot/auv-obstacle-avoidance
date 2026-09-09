@@ -273,6 +273,8 @@
               color: var(--accent); }
   .cell-note { font-family: var(--f-mono); font-size: 0.68rem; color: var(--muted);
                font-weight: 400; }
+  .def-q { font-family: var(--f-display); font-style: italic; text-transform: none;
+           letter-spacing: 0; color: var(--accent); }
 
   /* transition-graph text */
   .dg-region    { font-family: "IBM Plex Mono", monospace; font-size: 10px; fill: var(--muted);
@@ -314,6 +316,38 @@
         <p style="margin-top:0.7rem"><strong>Two.</strong> Because the supervisory structure separates them, its mode graph can be reasoned about directly. It carries a liveness property — the states that command zero forward speed cannot form a cycle — which is provable by construction and which a priority hierarchy, resolving velocities instant by instant, cannot express as a property at all.</p>
       </div>
       <p>Both legs point at the same thing: a hierarchy has one channel, and one channel cannot both carry two mechanisms and be reasoned about as a discrete structure. That is the contribution. The 2-D manifold underneath it is the enabling substrate (§3), and the deployed system is the evidence (§8).</p>
+
+      <h3>The two terms, defined</h3>
+      <p>The claim is only meaningful if both are defined without reference to the mechanism that supplies them. Each is a way of departing from "act on what is best right now", and they depart differently.</p>
+      <p><strong>Commitment</strong> — a decision persists after the observation that justified it is gone. The control law depends on internal state not recoverable from the current measurement, and the manoeuvre ends on an independent progress criterion rather than on the observation lapsing. It answers <em>keep going</em>.</p>
+      <p><strong>Sequencing</strong> — one control channel is suspended until another has converged. A degree of freedom is driven to zero not because its own objective is met but because a different objective has not yet been reached. It answers <em>not yet</em>.</p>
+      <p>The distinction from arbitration is what the paper turns on. <strong>Arbitration</strong> — the device a priority hierarchy provides — answers <em>which task acts this instant</em>. It has no way to say <em>keep going</em> except by holding a task active past its constraint, and no way to say <em>not yet</em> except by holding a task active while another converges. Both, therefore, must be encoded in the same variable: task activation. That is why they contend, and it is a property of the formalism rather than of any particular tuning.</p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th></th><th>Commitment · <span class="def-q">keep going</span></th><th>Sequencing · <span class="def-q">not yet</span></th></tr></thead>
+        <tbody>
+          <tr><td>What it is</td>
+              <td>A decision outliving its justifying observation</td>
+              <td>One channel suspended pending another's convergence</td></tr>
+          <tr><td>What it needs</td>
+              <td>State carried across cycles, and a termination condition independent of the observation</td>
+              <td>Authority to zero a control input for a reason external to that input's own objective</td></tr>
+          <tr><td>In task priority</td>
+              <td>Hold a set-based task active past its constraint — <em>dwell</em></td>
+              <td>Hold a task active until its error closes — <em>stop-to-converge</em></td></tr>
+          <tr><td>In the supervisory design</td>
+              <td>The cliff-top latch: a ratcheted target with position-gated release</td>
+              <td>Mode selection: two modes that command zero forward speed</td></tr>
+          <tr class="row-hero"><td>Where it lives</td>
+              <td colspan="2">Both in task activation for a hierarchy — one variable, so they compete. In separate variables for the supervisory design — latch state and mode, so they compose.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="body">
+      <p>That the baseline's two switches are faithful instances of each concept is what licenses reading §5's table as a 2×2 over the concepts rather than over two arbitrary flags. It is also why the fourth cell matters: task priority given both is the strongest form of the objection that the supervisory structure is unnecessary.</p>
       <p>Ordered for eight pages: contention leads, liveness follows as the guarantee it unlocks, the representation is method, the deployment is evaluation.</p>
     </div>
   </section>
@@ -409,11 +443,12 @@
       <p>Worth stating plainly, because several of the decisions below were arrived at during hardening and are load-bearing for the claims.</p>
       <p>Five modes. Three command survey speed — <code>ALT_FOLLOW</code>, <code>OBSTACLE_HOLD</code>, <code>TAIL_CLEAR</code>. Two command zero — <code>OBSTACLE_CLEAR</code> ascending in place, <code>ALT_CORRECTION</code> descending in place. Selection runs off the depth error at the vehicle column through a Schmitt band, and the cliff-top latch overrides it while committed.</p>
 
-      <h3>Commitment: the cliff-top latch</h3>
-      <p>On detecting a forward obstacle the latch commits to a target depth and a peak position. The target ratchets shallower only; the peak ratchets forward only; release is position-gated at peak plus standoff plus vehicle length, or on a heading change beyond the staleness gate. While committed the commanded depth <em>is</em> the latch target and any mode other than <code>OBSTACLE_CLEAR</code> is overridden to <code>OBSTACLE_HOLD</code> — so the vehicle either climbs to the target or flies forward at it, and never descends mid-traverse.</p>
+      <h3>Commitment (§1) lives in the cliff-top latch</h3>
+      <p>State carried across cycles, with a termination condition independent of the observation — the two things the definition requires. On detecting a forward obstacle the latch commits to a target depth and a peak position. The target ratchets shallower only; the peak ratchets forward only; release is position-gated at peak plus standoff plus vehicle length, or on a heading change beyond the staleness gate. While committed the commanded depth <em>is</em> the latch target and any mode other than <code>OBSTACLE_CLEAR</code> is overridden to <code>OBSTACLE_HOLD</code> — so the vehicle either climbs to the target or flies forward at it, and never descends mid-traverse.</p>
 
-      <h3>Sequencing: stop, converge, advance</h3>
-      <p>The two zero-speed modes are the sequencing mechanism. Where relief outruns the depth rate the vehicle halts, closes the vertical error, then advances — which is what produces time on altitude, and is the behaviour §5 shows a hierarchy cannot supply alongside commitment.</p>
+      <h3>Sequencing (§1) lives in mode selection</h3>
+      <p>Authority to zero one control input for a reason external to that input's own objective — here, surge held at zero while the vertical error closes. Where relief outruns the depth rate the vehicle halts, converges, then advances, which is what produces time on altitude.</p>
+      <p>The two mechanisms are in different variables: latch state and mode. Neither reads the other, and that is the whole of the structural claim — §5 measures what happens when a formalism has only one variable to put both in.</p>
 
       <h3>The vehicle-column command</h3>
       <p>Takes the shallower of the hull-footprint manifold minimum and the latest direct vertical range from DVL or altimeter. Two reasons, both learned the hard way. On a slope the nadir column knows nothing about terrain the bow and stern sit over. And after a turn wipes the map the manifold can be optimistic while a current altitude return is not — a stationary vehicle post-turn on a 70° face was commanded to descend from a manifold reading 1.08 m deeper than the true terrain under its stern, against a 1.0 m tail-safety band that consequently never engaged.</p>

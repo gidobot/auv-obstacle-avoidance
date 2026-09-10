@@ -144,12 +144,20 @@ def tp_both_factory(cfg, dvl, sonar, alt):
     return TaskPriorityMapper(cfg, dvl, sonar, alt, dwell_s=hold,
                               stop_to_converge=True)
 
+def tp_geom_factory(cfg, dvl, sonar, alt):
+    # Commitment gated on geometry rather than on a clock, inside the
+    # task-priority formalism.  Tests whether the arbitration layer matters
+    # once the auxiliary state is the same.
+    return TaskPriorityMapper(cfg, dvl, sonar, alt, dwell_s=0.0,
+                              stop_to_converge=True, geometric_latch=True)
+
 CONTROLLERS = {
     'latch':         latch_factory,
     'tp':            tp_factory,
     'tp+dwell':      tp_dwell_factory,
     'tp+stop':       tp_stop_factory,
     'tp+dwell+stop': tp_both_factory,
+    'tp+geom+stop':  tp_geom_factory,
 }
 
 

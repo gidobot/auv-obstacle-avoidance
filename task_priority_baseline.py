@@ -101,7 +101,8 @@ class TaskPriorityMapper:
     """
 
     def __init__(self, cfg, dvl_cfg, sonar_cfg, alt_cfg=None,
-                 buffer_m=0.25, dwell_s=0.0, stop_to_converge=False):
+                 buffer_m=0.25, dwell_s=0.0, stop_to_converge=False,
+                 geometric_latch=False):
         self._inner = cpp.ObstacleMapper(
             cfg, dvl_cfg, sonar_cfg, alt_cfg or cpp.AltimeterConfig())
         self.cfg = cfg
@@ -109,6 +110,18 @@ class TaskPriorityMapper:
         self.dwell_s = float(dwell_s)
         self.stop_to_converge = bool(stop_to_converge)
         self._converging = False        # Schmitt state for the stop rule
+
+        # Geometric commitment: an auxiliary state the priority framework does
+        # not itself provide.  A set-based task activates on the current value
+        # of its constraint; gating on geometry needs a peak position that is
+        # no longer observable once the feature leaves the map, so it has to be
+        # carried here — a discrete flag, a ratcheted continuous reference, and
+        # set/clear rules.  That is a hybrid automaton above the arbitration,
+        # which is precisely what this variant exists to test.
+        self.geometric_latch = bool(geometric_latch)
+        self._latched = False
+        self._latch_peak_x = np.nan
+        self._latch_target_z = np.nan
 
         self._t = 0.0
         self._depth = 0.0
@@ -133,6 +146,9 @@ class TaskPriorityMapper:
         self.active_task = 3
         self.transitions = 0
         self._converging = False
+        self._latched = False
+        self._latch_peak_x = np.nan
+        self._latch_target_z = np.nan
 
     def update_sensor(self, sensor_type, measurement, pose):
         self._inner.update_sensor(sensor_type, measurement, pose)
@@ -215,6 +231,44 @@ class TaskPriorityMapper:
             return np.nan
         return max(0.0, min(cand) - c.imaging_altitude)
 
+    def _update_geometric_latch(self):
+        """Commit to a peak and hold until the vehicle has passed it.
+
+        Mirrors the deployed latch: the depth target ratchets shallower only,
+        the peak ratchets forward only, and release is position-gated at
+        peak + cliff_standoff + vehicle_length.  Returns the held target depth
+        while committed, NaN otherwise.
+        """
+        c = self.cfg
+        omap = self._inner.omap
+        v_x = omap.grid_to_world_x(omap.cx)
+
+        if self._latched and v_x >= self._latch_peak_x + c.cliff_standoff + c.vehicle_length:
+            self._latched = False
+            self._latch_peak_x = np.nan
+            self._latch_target_z = np.nan
+
+        # Fresh detection uses the same forward window as the memoryless task.
+        x, z, obs = self._manifold_world()
+        nose = v_x + c.vehicle_length / 2.0
+        win = obs & (x >= nose) & (x <= nose + c.cliff_standoff) \
+              & (z <= self._depth + c.safety_below_m)
+        if win.any():
+            peak_z = float(np.min(z[win]))
+            peak_x = float(np.max(x[win]))
+            target = peak_z - c.imaging_altitude
+            if not self._latched:
+                self._latched = True
+                self._latch_target_z = target
+                self._latch_peak_x = peak_x
+            else:
+                if target < self._latch_target_z:
+                    self._latch_target_z = target
+                if peak_x > self._latch_peak_x:
+                    self._latch_peak_x = peak_x
+
+        return self._latch_target_z if self._latched else np.nan
+
     def _set_based(self, task_id, sigma):
         """Activation with a satisfaction buffer and optional dwell."""
         if not np.isfinite(sigma):
@@ -241,7 +295,16 @@ class TaskPriorityMapper:
         s2, required_depth = self._sigma_forward()
 
         t1 = self._set_based(1, s1)
-        t2 = self._set_based(2, s2)
+        if self.geometric_latch:
+            held = self._update_geometric_latch()
+            if np.isfinite(held):
+                # Commitment carried by state, released on position rather than
+                # on the observation lapsing or on a clock expiring.
+                t2, required_depth = True, held
+            else:
+                t2 = self._set_based(2, s2)
+        else:
+            t2 = self._set_based(2, s2)
 
         if t1:
             # Ascend until the hull clearance constraint is satisfied again.

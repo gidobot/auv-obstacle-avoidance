@@ -119,6 +119,20 @@ def tp_stop_factory(cfg, dvl, sonar, alt):
     return TaskPriorityMapper(cfg, dvl, sonar, alt, dwell_s=0.0,
                               stop_to_converge=True)
 
+def make_dwell_factory(hold_s):
+    """Task priority with sequencing on and commitment set to `hold_s` seconds.
+
+    The axis §5's claim is stated over: dwell is how a hierarchy expresses
+    commitment, and the prediction is that no value of it buys mission quality
+    and safety together, because both are drawn from the same activation
+    channel.  A setting that achieves both would falsify the claim.
+    """
+    def factory(cfg, dvl, sonar, alt):
+        return TaskPriorityMapper(cfg, dvl, sonar, alt,
+                                  dwell_s=hold_s, stop_to_converge=True)
+    return factory
+
+
 def tp_both_factory(cfg, dvl, sonar, alt):
     # Both additions at once: commitment (dwell on set-based tasks) and
     # sequencing (hold station until the altitude task converges).  This is the
@@ -307,7 +321,32 @@ def sweep_speed(rows, seeds):
             r = trials(ctrl, cfg, seeds); r['sweep'], r['value'] = 'speed', vx
             rows.append(r); show(r)
 
-SWEEPS = {'none': sweep_none, 'horizon': sweep_horizon, 'speed': sweep_speed}
+def sweep_dwell(rows, seeds):
+    """Vary commitment against fixed sequencing; test for a Pareto escape."""
+    cfg0 = cpp.OccupancyMapConfig()
+    natural = (cfg0.cliff_standoff + cfg0.vehicle_length) / max(cfg0.survey_speed, 1e-6)
+    header(f"dwell sweep · sequencing on throughout · natural hold = {natural:g} s",
+           len(seeds))
+
+    # the deployed controller as the reference both columns are measured against
+    r = trials('latch', cpp.OccupancyMapConfig(), seeds)
+    r['sweep'], r['value'] = 'dwell', -1.0
+    rows.append(r); show(r)
+
+    for hold in (0.0, 1.0, 2.0, 4.0, natural, 12.0, 16.0, 24.0):
+        cfg = cpp.OccupancyMapConfig()
+        name = f"dwell {hold:g}s"
+        CONTROLLERS[name] = make_dwell_factory(hold)
+        try:
+            r = trials(name, cfg, seeds)
+            r['sweep'], r['value'] = 'dwell', hold
+            rows.append(r); show(r)
+        finally:
+            del CONTROLLERS[name]
+
+
+SWEEPS = {'none': sweep_none, 'horizon': sweep_horizon,
+          'speed': sweep_speed, 'dwell': sweep_dwell}
 
 
 def main():

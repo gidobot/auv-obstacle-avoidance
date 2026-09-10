@@ -244,6 +244,7 @@
     border-radius: 2px; vertical-align: 0.1em; white-space: nowrap;
   }
   .chip-have { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .chip-done { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
   .chip-need { background: color-mix(in srgb, var(--caution) 18%, transparent); color: var(--caution); }
   .chip-gap  { background: var(--accent-bg); color: var(--accent); }
 
@@ -313,7 +314,8 @@
       <p>An earlier version of this document argued commitment under lost observability as the thesis. The experiments did not support it: commitment alone moves the mission metric by a tenth of a percentage point, and once the planner's vehicle-column rule was corrected, nothing collides from losing sight of an obstacle. What the work does support is narrower, sharper, and has two halves that share one cause.</p>
       <div class="claim">
         <p><strong>One.</strong> Holding survey altitude over rugose terrain requires <em>temporal sequencing</em> — halting translation until the vertical task converges — and requires <em>commitment</em> through a manoeuvre. Task priority can be given either, but expresses both through the same channel: which task is currently active. Holding a task active for commitment consumes the very cycles the altitude task needs to converge. They contend.</p>
-        <p style="margin-top:0.7rem"><strong>Two.</strong> Because the supervisory structure separates them, its mode graph can be reasoned about directly. It carries a liveness property — the states that command zero forward speed cannot form a cycle — which is provable by construction and which a priority hierarchy, resolving velocities instant by instant, cannot express as a property at all.</p>
+        <p style="margin-top:0.7rem"><strong>One, sharpened by the sweep.</strong> A hierarchy can express commitment only as a duration, and a clock carries no discharge condition — too short abandons the manoeuvre, too long acts on a target the world has invalidated. The latch releases on the vehicle's progress past the feature, so it knows when the commitment is satisfied.</p>
+      <p style="margin-top:0.7rem"><strong>Two.</strong> Because the supervisory structure separates them, its mode graph can be reasoned about directly. It carries a liveness property — the states that command zero forward speed cannot form a cycle — which is provable by construction and which a priority hierarchy, resolving velocities instant by instant, cannot express as a property at all.</p>
       </div>
       <p>Both legs point at the same thing: a hierarchy has one channel, and one channel cannot both carry two mechanisms and be reasoned about as a discrete structure. That is the contribution. The 2-D manifold underneath it is the enabling substrate (§3), and the deployed system is the evidence (§8).</p>
 
@@ -498,7 +500,46 @@
       <p><strong>Sequencing carries the mission.</strong> Stop-to-converge alone takes time-on-altitude from 1.0% to 6.7%, a sevenfold gain, where commitment alone moves it to 1.1%.</p>
       <p><strong>Sequencing alone is unsafe.</strong> Halting to converge means descending in place beside steep terrain, and without commitment the vehicle does that into the seabed in four runs of fifteen.</p>
       <p><strong>Both together still fall short</strong> — 4.9% against 7.7%, and a worst-case clearance of 6 cm. And the mechanism is measurable, not inferred: adding dwell to the sequencing variant lifts set-based task occupancy from 34.9% to 53.1% while altitude convergence falls from 58.0% to 41.8%. Commitment is expressed by holding a task active; sequencing by the altitude task running long enough to converge; in a hierarchy those are the same variable, so every cycle spent committed is a cycle not spent converging. The trade is structural, not a tuning artefact.</p>
-      <p>The supervisory design does not face it because the two live in different places — the latch governs the depth target held through a traverse, mode selection governs whether the vehicle surges. They compose instead of contending. This is falsifiable: if some dwell duration escapes the trade-off, the claim is wrong. §8 records that sweep as outstanding.</p>
+      <p>The supervisory design does not face it because the two live in different places — the latch governs the depth target held through a traverse, mode selection governs whether the vehicle surges. They compose instead of contending.</p>
+
+      <h3>The dwell sweep, and what it changed</h3>
+      <p>The claim as stated was unbounded, so commitment was swept from zero to three times the traverse the geometry demands, with sequencing on throughout and seeds held fixed. A setting reaching the deployed controller on both axes would have falsified it.</p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Commitment</th><th>t@alt %</th><th>line (m)</th><th>worst clr</th><th>&lt;0.5 m</th><th>collided</th></tr></thead>
+        <tbody>
+          <tr class="row-hero"><td>latch (position-gated)</td><td class="num-cell">7.7 ± 0.4</td><td class="num-cell">14.9</td>
+              <td class="num-cell">0.93</td><td class="num-cell">0</td><td><span class="chip chip-have">0 / 15</span></td></tr>
+          <tr><td>dwell 0 s</td><td class="num-cell">6.7 ± 1.1</td><td class="num-cell">13.1</td>
+              <td class="num-cell bad">−0.88</td><td class="num-cell">190</td><td><span class="chip chip-bad">4 / 15</span></td></tr>
+          <tr><td>dwell 1 s</td><td class="num-cell">7.2 ± 1.0</td><td class="num-cell">14.0</td>
+              <td class="num-cell bad">−0.97</td><td class="num-cell">182</td><td><span class="chip chip-bad">5 / 15</span></td></tr>
+          <tr><td>dwell 2 s</td><td class="num-cell">7.6 ± 0.8</td><td class="num-cell">14.8</td>
+              <td class="num-cell bad">−0.14</td><td class="num-cell">27</td><td><span class="chip chip-bad">1 / 15</span></td></tr>
+          <tr><td>dwell 4 s</td><td class="num-cell">7.1 ± 0.9</td><td class="num-cell">13.7</td>
+              <td class="num-cell bad">−0.14</td><td class="num-cell">14</td><td><span class="chip chip-bad">1 / 15</span></td></tr>
+          <tr><td>dwell 8 s <span class="cell-note">natural</span></td><td class="num-cell">4.9 ± 0.9</td><td class="num-cell">9.3</td>
+              <td class="num-cell warn">0.06</td><td class="num-cell">16</td><td><span class="chip chip-have">0 / 15</span></td></tr>
+          <tr><td>dwell 12 s</td><td class="num-cell">3.0 ± 0.7</td><td class="num-cell">5.5</td>
+              <td class="num-cell bad">−2.63</td><td class="num-cell">259</td><td><span class="chip chip-bad">5 / 15</span></td></tr>
+          <tr><td>dwell 16 s</td><td class="num-cell">3.0 ± 0.9</td><td class="num-cell">5.8</td>
+              <td class="num-cell bad">−2.59</td><td class="num-cell">623</td><td><span class="chip chip-bad">6 / 15</span></td></tr>
+          <tr><td>dwell 24 s</td><td class="num-cell">2.2 ± 0.6</td><td class="num-cell">4.4</td>
+              <td class="num-cell bad">−2.56</td><td class="num-cell">405</td><td><span class="chip chip-bad">3 / 15</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="body">
+      <p><strong>No setting reaches the deployed controller on both axes</strong>, so the claim stands. But the result is richer than the monotone trade-off predicted, and the paper is better for the difference.</p>
+      <p>At two seconds a hierarchy essentially <em>matches</em> the deployed controller on mission quality — 7.6 ± 0.8 against 7.7 ± 0.4, indistinguishable — while still breaching half a metre on twenty-seven cycles against zero. The only collision-free setting, eight seconds, costs 36% of the mission. So the honest form of the claim is not that task priority is poor at this survey. It is that no single duration is simultaneously short enough to stay out of the way and long enough to be safe.</p>
+      <div class="claim">
+        <p>Beyond twelve seconds the frontier does not merely trade — it collapses, to −2.6 m worst clearance and hundreds of breach cycles. The mechanism is measurable: at sixteen seconds the safety task's occupancy more than doubles, from 7.8% to 17.4%, and the worst clearance occurs <em>inside</em> it. The vehicle is held on an activation justified sixteen seconds earlier and driven into terrain by a commitment it should long since have discharged.</p>
+      </div>
+      <p>That is the sharper claim the sweep bought. <strong>A hierarchy can express commitment only as a duration, and duration is the wrong shape for it, because a clock carries no discharge condition.</strong> Too short and the manoeuvre is abandoned; too long and the controller acts on a target the world has already invalidated. The latch releases on position — the vehicle having passed the peak by standoff plus its own length — so it knows when the commitment is satisfied because the condition refers to progress past the feature rather than to elapsed time. Expressing that inside a hierarchy would require remembering the peak, which is the supervisory construct arriving by another name.</p>
+      <p>Two cautions on reading the table. Collision counts of one in fifteen are weak evidence against zero; the breach counts, being many events per run rather than one rare one, are the sounder safety discriminator, and they separate cleanly (27 and 14 against 0). And this sweeps one of the baseline's two hand-set parameters — the convergence band is still fixed, and a reviewer may reasonably ask whether it moves the frontier.</p>
     </div>
   </section>
 
@@ -661,7 +702,9 @@
 
       <h3>Outstanding</h3>
       <ul>
-        <li><span class="chip chip-need">do</span> <strong>Sweep the dwell duration.</strong> §5 predicts no setting escapes the trade-off. If one does, the necessity claim is wrong and the paper changes. The one experiment that cannot be skipped.</li>
+        <li><span class="chip chip-have">done</span> <strong>The dwell sweep</strong> — §5. No setting reaches the deployed controller on both axes; the frontier is non-monotone and collapses past twelve seconds.</li>
+        <li><span class="chip chip-need">do</span> <strong>More seeds at 2, 4 and 8 s.</strong> One collision in fifteen is thin evidence against zero, and those three points carry the claim.</li>
+        <li><span class="chip chip-need">do</span> <strong>Sweep the convergence band</strong> — the baseline's other hand-set parameter, and the obvious next question once dwell is bounded.</li>
         <li><span class="chip chip-need">do</span> <strong>Both controllers in SITL over the reef mesh</strong>, as their own implementations. Headline results and the fidelity arm at once.</li>
         <li><span class="chip chip-need">do</span> <strong>The sawtooth in SITL</strong> — cheap from the same parametric definition, and what licenses the sweeps.</li>
         <li><span class="chip chip-need">do</span> <strong>A straddled-pinnacle fixture</strong> — §6. The one geometry that exercises the liveness guard, currently untested by execution.</li>

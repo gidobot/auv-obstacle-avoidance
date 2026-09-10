@@ -299,7 +299,7 @@
   <header class="mast">
     <p class="eyebrow">Publication positioning · rewritten against the current implementation</p>
     <h1>Sequencing Over Arbitration</h1>
-    <p class="standfirst">A supervisory mode structure buys two things a single task-priority hierarchy cannot. It can hold commitment and sequencing at once, because they live in separate mechanisms rather than contending for one arbitration channel. And it admits a liveness guarantee — no cycle of states without forward progress — that a priority hierarchy has no way even to state. Both are measured on a deployed AUV controller for rugose reef survey.</p>
+    <p class="standfirst">Fixed-altitude survey over rugose reef terrain needs two separable ingredients: sequencing translation against vertical convergence, and commitment discharged by vehicle geometry rather than by a clock or by continued observation. Neither alone suffices, a timer cannot substitute for the second at any setting, and given both a standard task-priority controller matches a deployed supervisory design. The finding is what such a controller requires — and it transfers.</p>
     <div class="meta">
       <span><b>Platform</b> ACFR seafloor-imaging AUV</span>
       <span><b>Implementation</b> auv_oavoid / oa-mapper</span>
@@ -309,15 +309,16 @@
   </header>
 
   <section>
-    <div class="sec-head"><span class="num">01</span><h2>The claim, in two legs</h2></div>
+    <div class="sec-head"><span class="num">01</span><h2>The claim</h2></div>
     <div class="body">
       <p>An earlier version of this document argued commitment under lost observability as the thesis. The experiments did not support it: commitment alone moves the mission metric by a tenth of a percentage point, and once the planner's vehicle-column rule was corrected, nothing collides from losing sight of an obstacle. What the work does support is narrower, sharper, and has two halves that share one cause.</p>
       <div class="claim">
-        <p><strong>One.</strong> Holding survey altitude over rugose terrain requires <em>temporal sequencing</em> — halting translation until the vertical task converges — and requires <em>commitment</em> through a manoeuvre. Task priority can be given either, but expresses both through the same channel: which task is currently active. Holding a task active for commitment consumes the very cycles the altitude task needs to converge. They contend.</p>
-        <p style="margin-top:0.7rem"><strong>One, sharpened by the sweep.</strong> A hierarchy can express commitment only as a duration, and a clock carries no discharge condition — too short abandons the manoeuvre, too long acts on a target the world has invalidated. The latch releases on the vehicle's progress past the feature, so it knows when the commitment is satisfied.</p>
-      <p style="margin-top:0.7rem"><strong>Two.</strong> Because the supervisory structure separates them, its mode graph can be reasoned about directly. It carries a liveness property — the states that command zero forward speed cannot form a cycle — which is provable by construction and which a priority hierarchy, resolving velocities instant by instant, cannot express as a property at all.</p>
+        <p>Holding survey altitude over rugose terrain requires two separable things. <strong>Temporal sequencing</strong> — halting translation until the vertical task converges — carries the mission: without it, time on altitude is 1.0%. <strong>Commitment discharged by geometry</strong> — a manoeuvre held until the vehicle has passed the feature, not until a timer expires or the observation lapses — carries safety: without it, sequencing alone drives the vehicle into the seabed in four runs of fifteen.</p>
+        <p style="margin-top:0.7rem">Neither substitutes for the other, and the second cannot be expressed as a duration. Swept from zero to three times its natural value, no dwell setting achieves both; past twelve seconds the frontier collapses, because a clock carries no discharge condition and the vehicle acts on a target the world has already invalidated.</p>
       </div>
-      <p>Both legs point at the same thing: a hierarchy has one channel, and one channel cannot both carry two mechanisms and be reasoned about as a discrete structure. That is the contribution. The 2-D manifold underneath it is the enabling substrate (§3), and the deployed system is the evidence (§8).</p>
+      <p><strong>The ingredients are portable, and that is the result.</strong> An earlier version of this document argued that a task-priority hierarchy could not supply both, because both would have to be encoded in task activation. That is not what the measurement shows. Given the same two ingredients — sequencing, and a latched geometric reference with position-gated release — a standard set-based task-priority controller reproduces the deployed supervisory design and marginally exceeds it: 8.1 ± 0.2 against 7.7 ± 0.4 time on altitude, no breaches either way. The claim that survives is about <em>what is required</em>, not about which architecture can hold it.</p>
+      <p>What the priority framework does not supply is the state. A set-based task activates on the current value of its constraint; a geometric discharge condition needs a reference that stops being observable once the feature is behind the vehicle, so it must be carried as auxiliary state — a latched flag, a ratcheted position, set and clear rules. That is a hybrid automaton above the arbitration. Task priority answers <em>which task acts now, given the state</em>; it was never a mechanism for deciding what the state should be, and identifying which state that has to be is the contribution.</p>
+      <p>The deployed system supplies the existence proof and the field validation, and its mode graph carries a liveness property worth stating in its own right (§6). The 2-D manifold underneath is the enabling substrate (§3).</p>
 
       <h3>The two terms, defined</h3>
       <p>The claim is only meaningful if both are defined without reference to the mechanism that supplies them. Each is a way of departing from "act on what is best right now", and they depart differently.</p>
@@ -464,7 +465,7 @@
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">05</span><h2>Leg one · commitment and sequencing contend</h2></div>
+    <div class="sec-head"><span class="num">05</span><h2>What the controller requires</h2></div>
     <div class="body">
       <p>A 4-leg lawnmower across a 70° sawtooth ridge field — 20 m teeth on a 30 m seafloor with 10 m flats, legs along the axis the teeth progress on, so each 40 m leg crosses about two and a third crests. The vehicle launches at the surface; the descent is excluded. Each leg transition is two 90° on-the-spot yaws, which exceed the staleness gate and invalidate the map. The terrain is a parameterised proxy for rugosity, not a reef.</p>
       <p>All controllers <strong>share the deployed perception stack</strong> — same grid, same manifold, same measurements — so only the arbitration differs and any difference is a property of the control law. Fifteen noise realisations per condition, same seeds across controllers. The figure of merit is time held at imaging altitude, not ground covered: halting to reach altitude before advancing is correct behaviour here, so scoring coverage would penalise the right answer.</p>
@@ -489,6 +490,9 @@
           <tr><td>+ both</td><td class="tick">✓</td><td class="tick">✓</td>
               <td class="num-cell">4.9 ± 0.9</td><td class="num-cell">9.3</td>
               <td class="num-cell warn">0.06</td><td><span class="chip chip-have">0 / 15</span></td></tr>
+          <tr><td>+ both, commitment by <em>geometry</em></td><td class="tick">✓</td><td class="tick">✓</td>
+              <td class="num-cell">8.1 ± 0.2</td><td class="num-cell">15.9</td>
+              <td class="num-cell">1.02</td><td><span class="chip chip-have">0 / 15</span></td></tr>
           <tr class="row-hero"><td>supervisory (deployed)</td><td class="tick">✓</td><td class="tick">✓</td>
               <td class="num-cell">7.7 ± 0.4</td><td class="num-cell">14.9</td>
               <td class="num-cell">0.93</td><td><span class="chip chip-have">0 / 15</span></td></tr>
@@ -502,7 +506,7 @@
       <p><strong>Both together still fall short</strong> — 4.9% against 7.7%, and a worst-case clearance of 6 cm. And the mechanism is measurable, not inferred: adding dwell to the sequencing variant lifts set-based task occupancy from 34.9% to 53.1% while altitude convergence falls from 58.0% to 41.8%. Commitment is expressed by holding a task active; sequencing by the altitude task running long enough to converge; in a hierarchy those are the same variable, so every cycle spent committed is a cycle not spent converging. The trade is structural, not a tuning artefact.</p>
       <p>The supervisory design does not face it because the two live in different places — the latch governs the depth target held through a traverse, mode selection governs whether the vehicle surges. They compose instead of contending.</p>
 
-      <h3>The dwell sweep, and what it changed</h3>
+      <h3>Commitment as a duration: the dwell sweep</h3>
       <p>The claim as stated was unbounded, so commitment was swept from zero to three times the traverse the geometry demands, with sequencing on throughout and seeds held fixed. A setting reaching the deployed controller on both axes would have falsified it.</p>
     </div>
 
@@ -538,15 +542,20 @@
       <div class="claim">
         <p>Beyond twelve seconds the frontier does not merely trade — it collapses, to −2.6 m worst clearance and hundreds of breach cycles. The mechanism is measurable: at sixteen seconds the safety task's occupancy more than doubles, from 7.8% to 17.4%, and the worst clearance occurs <em>inside</em> it. The vehicle is held on an activation justified sixteen seconds earlier and driven into terrain by a commitment it should long since have discharged.</p>
       </div>
-      <p>That is the sharper claim the sweep bought. <strong>A hierarchy can express commitment only as a duration, and duration is the wrong shape for it, because a clock carries no discharge condition.</strong> Too short and the manoeuvre is abandoned; too long and the controller acts on a target the world has already invalidated. The latch releases on position — the vehicle having passed the peak by standoff plus its own length — so it knows when the commitment is satisfied because the condition refers to progress past the feature rather than to elapsed time. Expressing that inside a hierarchy would require remembering the peak, which is the supervisory construct arriving by another name.</p>
+      <p>That is the sharper claim the sweep bought. <strong>Duration is the wrong shape for commitment, because a clock carries no discharge condition.</strong> Too short and the manoeuvre is abandoned; too long and the controller acts on a target the world has already invalidated. What a commitment needs is a condition referring to the vehicle's progress past the feature — the deployed latch releases at peak plus standoff plus vehicle length — and that is a statement about geometry, not about elapsed time.</p>
+
+      <h3>Geometric commitment, inside the hierarchy</h3>
+      <p>Which raises the obvious question, and it deserved an experiment rather than an argument: can a geometric discharge condition be expressed in a task-priority framework? It can. The final row of the table is a set-based controller whose forward task commits to a detected peak, ratchets its target shallower and its peak forward, and releases on position — the deployed latch's discharge condition, with the rest of the priority resolution untouched. It reaches 8.1 ± 0.2 against the deployed 7.7 ± 0.4, with a better worst-case clearance and no breaches: it matches the supervisory design and marginally exceeds it.</p>
+      <p>So the honest conclusion is not that a hierarchy cannot hold both. It is that the two ingredients are what matter, and they transfer. What the framework does not supply is the auxiliary state a geometric condition requires — a set-based task activates on the current value of its constraint, and a peak that has passed behind the vehicle is no longer in any constraint value. Carrying it means adding a latched flag, a ratcheted reference and set/clear rules above the arbitration. Task priority resolves competing tasks given the state; deciding what the state must be is a separate question, and answering it is the contribution.</p>
+      <p>Two caveats on reading that row. The variant shares the deployed perception stack entirely and inherits every correction made to it, so the comparison isolates the control law and nothing else. And it has never flown — the deployed controller has, which is why it remains the existence proof and the field-validation platform.</p>
       <p>Two cautions on reading the table. Collision counts of one in fifteen are weak evidence against zero; the breach counts, being many events per run rather than one rare one, are the sounder safety discriminator, and they separate cleanly (27 and 14 against 0). And this sweeps one of the baseline's two hand-set parameters — the convergence band is still fixed, and a reviewer may reasonably ask whether it moves the frontier.</p>
     </div>
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">06</span><h2>Leg two · liveness by construction</h2></div>
+    <div class="sec-head"><span class="num">06</span><h2>Liveness by construction</h2></div>
     <div class="body">
-      <p>The controller this replaced could livelock; its history carries a fix meant to help the rise-over routine "resolve if stuck". Ruling that class out by construction is a claim worth making, and separating commitment from sequencing is what makes the mode graph small enough to support it.</p>
+      <p>A property of the deployed implementation, worth stating in its own right rather than as evidence against any alternative. The controller this replaced could livelock — its history carries a fix meant to help the rise-over routine "resolve if stuck" — and the deployed mode graph is small enough to rule that class out by construction.</p>
       <div class="claim">
         <p>Every maximal interval of cycles commanding zero forward speed is finite, except one: the vehicle held at the surface by a target it cannot reach. Mission end aside, that is the only state from which forward progress does not resume.</p>
       </div>
@@ -744,7 +753,7 @@
       </div></li>
       <li><span class="o-num">VI</span><div>
         <p class="o-title">Experiments and results · ~2.25 pp</p>
-        <p class="o-note">Instruments and the validation chain, the five-controller table, the contention mechanism, the dwell sweep, reef results. Headline: sequencing carries the mission, commitment carries safety, one channel cannot carry both.</p>
+        <p class="o-note">Instruments and the validation chain, the five-controller table, the contention mechanism, the dwell sweep, reef results. Headline: sequencing carries the mission, geometric commitment carries safety, a clock cannot substitute for the second, and the pair transfers to a standard hierarchy.</p>
       </div></li>
       <li><span class="o-num">VII</span><div>
         <p class="o-title">Discussion · ~0.5 pp</p>
@@ -795,7 +804,7 @@
       <p><strong>This closes the JOE path for this work.</strong> RA-L is itself a journal, so a later JOE paper would be a journal-to-journal extension needing substantial new content. If the work grows past eight pages rather than fitting, split by subject and not by increment: contention and liveness stay at RA-L, and the representation plus an extended field campaign becomes a separate marine-venue paper on surveying rugose reef terrain under sparse sensing.</p>
       <h3>Format notes</h3>
       <ul>
-        <li>Review is fast but unforgiving of overclaiming. Prefer "a single priority hierarchy cannot supply both without trading one against the other, across the range we swept" to "the mode structure is necessary".</li>
+        <li>Review is fast but unforgiving of overclaiming. The result is about required ingredients, not architectural necessity — say "both are required, and both transfer" rather than anything implying a hierarchy is deficient. The measurement shows the opposite.</li>
         <li>The liveness result is a property of the mode logic given a bounded command. State that scope in the theorem, not in a footnote.</li>
         <li>Over-length pages carry a fee and the allowance differs between the journal and the conference option. Confirm both against the current call.</li>
       </ul>

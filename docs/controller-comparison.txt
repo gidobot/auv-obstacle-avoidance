@@ -1,0 +1,13 @@
+
+nominal  (horizon_back 15 m, survey 0.5 m/s)   [15 noise seeds]
+  controller           t@alt %  d@alt m  alt rms worst clr  <0.5m  collided
+  -------------- ------------- -------- -------- --------- ------ ---------
+  latch               7.7+-0.4      14.9    9.832     0.929      0         -
+  tp                  1.0+-0.1       2.4   12.524     0.823      0         -
+  tp+dwell            1.1+-0.1       2.7   13.857     0.821      0         -
+  tp+stop             6.7+-1.1      13.1   11.894    -0.878    190      4/15
+  tp+dwell+stop       4.9+-0.9       9.3   11.075     0.064     16         -
+  tp+geom+stop        8.1+-0.2      15.9    9.618     1.018      0         -
+
+
+[exited with code 0]

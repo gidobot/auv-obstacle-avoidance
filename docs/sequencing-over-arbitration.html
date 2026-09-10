@@ -299,7 +299,7 @@
   <header class="mast">
     <p class="eyebrow">Publication positioning · rewritten against the current implementation</p>
     <h1>Sequencing Over Arbitration</h1>
-    <p class="standfirst">Fixed-altitude survey over rugose reef terrain needs two separable ingredients: sequencing translation against vertical convergence, and commitment discharged by vehicle geometry rather than by a clock or by continued observation. Neither alone suffices, a timer cannot substitute for the second at any setting, and given both a standard task-priority controller matches a deployed supervisory design. The finding is what such a controller requires — and it transfers.</p>
+    <p class="standfirst">The seafloor defines the ideal survey trajectory: track the terrain profile inside a tight altitude band for as much of the transect as clearance and vehicle limits allow. Reactive altitude following gets most of the way; it cannot climb obstacles, commit to cliffs before their tops are visible, or hold depth until the tail clears an edge. This is a controller for those exceptions — and it flies very nearly the trajectory the terrain permits.</p>
     <div class="meta">
       <span><b>Platform</b> ACFR seafloor-imaging AUV</span>
       <span><b>Implementation</b> auv_oavoid / oa-mapper</span>
@@ -313,12 +313,13 @@
     <div class="body">
       <p>An earlier version of this document argued commitment under lost observability as the thesis. The experiments did not support it: commitment alone moves the mission metric by a tenth of a percentage point, and once the planner's vehicle-column rule was corrected, nothing collides from losing sight of an obstacle. What the work does support is narrower, sharper, and has two halves that share one cause.</p>
       <div class="claim">
-        <p>Holding survey altitude over rugose terrain requires two separable things. <strong>Temporal sequencing</strong> — halting translation until the vertical task converges — carries the mission: without it, time on altitude is 1.0%. <strong>Commitment discharged by geometry</strong> — a manoeuvre held until the vehicle has passed the feature, not until a timer expires or the observation lapses — carries safety: without it, sequencing alone drives the vehicle into the seabed in four runs of fifteen.</p>
-        <p style="margin-top:0.7rem">Neither substitutes for the other, and the second cannot be expressed as a duration. Swept from zero to three times its natural value, no dwell setting achieves both; past twelve seconds the frontier collapses, because a clock carries no discharge condition and the vehicle acts on a target the world has already invalidated.</p>
+        <p>Given the manifold, the seafloor defines an ideal trajectory: follow the terrain profile within a tight band of the survey altitude, for as much of the transect as the vehicle's speed and clearance limits allow. The contribution is a controller that realises very nearly that trajectory online, from sparse causal observations, on terrain rugose enough that a reactive follower alone cannot.</p>
       </div>
-      <p><strong>The ingredients are portable, and that is the result.</strong> An earlier version of this document argued that a task-priority hierarchy could not supply both, because both would have to be encoded in task activation. That is not what the measurement shows. Given the same two ingredients — sequencing, and a latched geometric reference with position-gated release — a standard set-based task-priority controller reproduces the deployed supervisory design and marginally exceeds it: 8.1 ± 0.2 against 7.7 ± 0.4 time on altitude, no breaches either way. The claim that survives is about <em>what is required</em>, not about which architecture can hold it.</p>
-      <p>What the priority framework does not supply is the state. A set-based task activates on the current value of its constraint; a geometric discharge condition needs a reference that stops being observable once the feature is behind the vehicle, so it must be carried as auxiliary state — a latched flag, a ratcheted position, set and clear rules. That is a hybrid automaton above the arbitration. Task priority answers <em>which task acts now, given the state</em>; it was never a mechanism for deciding what the state should be, and identifying which state that has to be is the contribution.</p>
-      <p>The deployed system supplies the existence proof and the field validation, and its mode graph carries a liveness property worth stating in its own right (§6). The 2-D manifold underneath is the enabling substrate (§3).</p>
+      <p>A well-tuned reactive altitude follower already tracks smoothly varying terrain well under limited observability — that part is not novel and should not be claimed. What it cannot do is handle the exceptions: obstacles that must be climbed rather than followed, cliffs that must be committed to before their tops are visible, and tails that must clear an edge before the vehicle may descend. The deployed controller is reactive altitude following <em>plus</em> a disciplined set of exceptions — vertical corrections taken at zero forward speed, and geometric latches for clearance — so that the portion of the transect flown inside the band is maximised against the limits the seafloor imposes.</p>
+      <p>That framing sets the benchmark where it belongs. The question is not whether this beats another controller but how close it comes to the trajectory the terrain permits, which makes the terrain itself the standard and the comparison a supporting result rather than the thesis.</p>
+      <p>Two ingredients make the exceptions work, and they are separable and measurable. <strong>Sequencing</strong> — halting translation until the vertical task converges — carries the mission: without it, 1.0% of the transect is in band. <strong>Commitment discharged by geometry</strong> — a manoeuvre held until the vehicle has passed the feature rather than until a timer expires or the observation lapses — carries safety: without it, sequencing alone drives the vehicle into the seabed in four runs of fifteen. A duration cannot substitute for the second at any setting.</p>
+      <p>Both transfer. Given the same two ingredients a standard set-based task-priority controller reproduces the deployed design and marginally exceeds it (§5), which is worth reporting plainly: the claim is about what the problem requires, not about which formalism may hold it. What the priority framework does not supply is the state a geometric discharge condition needs — a latched reference that has stopped being observable — and identifying that state is the transferable part.</p>
+      <p><strong>Scope, stated up front.</strong> This is a controller for one style of mission: line-survey transects flown by a hover-capable vehicle over reef slopes, with a 2-D manifold that is valid while heading is roughly constant. The hover capability is what makes zero-speed vertical correction available at all, and the straight-line assumption is what makes the projection sound. Raising the control law to a full 3-D representation would be a different design and quite possibly a different answer; that is not a limitation buried in the last section but a boundary on the claim.</p>
 
       <h3>The two terms, defined</h3>
       <p>The claim is only meaningful if both are defined without reference to the mechanism that supplies them. Each is a way of departing from "act on what is best right now", and they depart differently.</p>
@@ -712,7 +713,8 @@
       <h3>Outstanding</h3>
       <ul>
         <li><span class="chip chip-have">done</span> <strong>The dwell sweep</strong> — §5. No setting reaches the deployed controller on both axes; the frontier is non-monotone and collapses past twelve seconds.</li>
-        <li><span class="chip chip-need">do</span> <strong>More seeds at 2, 4 and 8 s.</strong> One collision in fifteen is thin evidence against zero, and those three points carry the claim.</li>
+        <li><span class="chip chip-need">do</span> <strong>Compute the offline-optimal trajectory</strong> and measure the gap. With full terrain knowledge from the mesh, maximising time in band subject to vertical speed, forward speed and clearance is a well-posed optimisation, and the online controller can then be scored against the trajectory the terrain permits rather than against another controller. This is the headline evaluation the framing implies, and it turns "near-ideal" into a number.</li>
+        <li><span class="chip chip-need">do</span> <strong>More seeds at 2, 4 and 8 s.</strong> One collision in fifteen is thin evidence against zero, and those three points carry the dwell result.</li>
         <li><span class="chip chip-need">do</span> <strong>Sweep the convergence band</strong> — the baseline's other hand-set parameter, and the obvious next question once dwell is bounded.</li>
         <li><span class="chip chip-need">do</span> <strong>Both controllers in SITL over the reef mesh</strong>, as their own implementations. Headline results and the fidelity arm at once.</li>
         <li><span class="chip chip-need">do</span> <strong>The sawtooth in SITL</strong> — cheap from the same parametric definition, and what licenses the sweeps.</li>
@@ -733,7 +735,7 @@
     <ol class="outline">
       <li><span class="o-num">I</span><div>
         <p class="o-title">Introduction · ~1 pp</p>
-        <p class="o-note">Reef-slope survey at fixed altitude; rugosity as a continuous hazard. Both legs of the claim stated in the first column, with a three-line contribution list.</p>
+        <p class="o-note">Reef-slope line survey by a hover-capable vehicle; rugosity as a continuous hazard; the terrain-defined ideal trajectory as the standard. State the mission class and the 2-D straight-transect scope in the first column, not in the last section — it is a boundary on the claim, not an apology.</p>
       </div></li>
       <li><span class="o-num">II</span><div>
         <p class="o-title">Related work · ~0.75 pp</p>
@@ -753,7 +755,7 @@
       </div></li>
       <li><span class="o-num">VI</span><div>
         <p class="o-title">Experiments and results · ~2.25 pp</p>
-        <p class="o-note">Instruments and the validation chain, the five-controller table, the contention mechanism, the dwell sweep, reef results. Headline: sequencing carries the mission, geometric commitment carries safety, a clock cannot substitute for the second, and the pair transfers to a standard hierarchy.</p>
+        <p class="o-note">Lead with the optimality gap — realised trajectory against the offline optimum over the same terrain — then the ablation that explains it: sequencing carries the mission, geometric commitment carries safety, a clock cannot substitute for the second. The task-priority comparison follows as a supporting result showing the ingredients transfer.</p>
       </div></li>
       <li><span class="o-num">VII</span><div>
         <p class="o-title">Discussion · ~0.5 pp</p>
@@ -792,7 +794,7 @@
         <li><strong>Single degree of freedom.</strong> The controller commands depth — over, never around. This is where task priority genuinely wins, absorbing additional DOF where the mode set would need redesign. Concede it.</li>
         <li><strong>Overhangs are flown over, not under.</strong> Safe, but no imagery beneath one and altitude there is measured from the wrong surface. A coverage bound on the method.</li>
         <li><strong>One terminal state.</strong> Slopes too steep to traverse leave the vehicle at the surface, by design, failing safe rather than commanding through terrain.</li>
-        <li><strong>The test terrain is near the edge of feasibility.</strong> A 70° 20 m sawtooth permits at most ~19% time-on-altitude at 0.5 m/s, since each tooth costs about 72 s of vertical transit against 35 s of along-track. The controller reaches ~40% of that ceiling. Report the ceiling alongside the result or the absolute numbers read as failure.</li>
+        <li><strong>The test terrain is near the edge of feasibility, and the ceiling needs computing properly.</strong> A back-of-envelope bound — each 70° tooth costing about 72 s of vertical transit against 35 s of along-track — puts the maximum near 19% at 0.5 m/s, which would make the measured 7.7% roughly 40% of what is attainable. That estimate is too crude to carry the central claim: the offline optimum over the actual terrain is the right instrument, and it is the first item in §8. Report whichever bound is used alongside the result, or the absolute figures read as failure.</li>
       </ul>
     </div>
   </section>

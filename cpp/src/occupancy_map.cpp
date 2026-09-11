@@ -740,7 +740,22 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
     }
 
     // ----- Step 3: safety tail cap -----
-    if (safety_tail_blocked(vehicle_depth)) {
+    // Evaluated once and reused for the mode override below, which asked the
+    // same question a second time.
+    //
+    // Deliberately *not* hysteretic, though the raw signal looks like chatter:
+    // over a four-leg pattern it engages ~75 times across nine descending
+    // edges, with a median episode of exactly one grid column.  A Schmitt band
+    // widening the scan window by dx while engaged was tried and reverted — it
+    // merged episodes (75 -> 62) without shortening the total (40.9 -> 40.4 m)
+    // and cost 1.3 m of in-band line, because engagement can only be extended
+    // by a wider window.  The episodes are not a defect: TAIL_CLEAR and
+    // OBSTACLE_HOLD both command survey speed, so alternating between them
+    // changes no actuator output, and the total sits within ~3 m of the
+    // terrain's own tail-clearance budget.
+    bool tail_blocked = safety_tail_blocked(vehicle_depth);
+
+    if (tail_blocked) {
         for (int ix = cx_; ix < nx_; ++ix) {
             if (cmd_depth_[ix] > vehicle_depth) {
                 cmd_depth_[ix] = vehicle_depth;
@@ -759,7 +774,7 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
     // Tail clearance overrides altitude follow / correction only; the forward
     // obstacle latch (which returns earlier) and OBSTACLE_CLEAR are unchanged.
     set_mode_from_cmd_depth(vehicle_depth);
-    if (safety_tail_blocked(vehicle_depth) &&
+    if (tail_blocked &&
         (control_mode_ == "ALT_FOLLOW" || control_mode_ == "ALT_CORRECTION")) {
         control_mode_ = "TAIL_CLEAR";
     }

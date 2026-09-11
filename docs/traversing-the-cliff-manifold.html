@@ -318,7 +318,7 @@
       <p>Two mechanisms cover those exceptions, and both are forced rather than chosen:</p>
       <p><strong>Sequencing</strong> — suspending forward motion until the vertical error closes. Required because a vehicle can hold the band while surging only where the terrain gradient is at most <code>vertical_speed / survey_speed</code>; beyond it, surging necessarily leaves the band, and every metre flown out of band is a metre of transect not surveyed.</p>
       <p><strong>Commitment discharged by geometry</strong> — a manoeuvre held until the vehicle has passed the feature, not until the observation lapses or a timer expires. Required because the release condition is a <em>distance</em>: the peak plus standoff plus vehicle length. It cannot be a duration, and not merely because terrain varies — sequencing zeroes forward speed, so elapsed time and distance travelled decouple by construction. A time-based commitment is structurally incompatible with a sequencing controller.</p>
-      <p>Together they yield a policy with a clean characterisation (§5): surge if and only if the vehicle is in band, or forward motion is required to clear a feature before it may descend. That is the deployed mode structure, which suggests the residual gap to the ideal is a property of perception rather than of control — a hypothesis the evaluation is built to test.</p>
+      <p>Together they yield a policy with a clean characterisation (§5): surge if and only if the vehicle is in band, or forward motion is required to clear a feature before it may descend. That is the deployed mode structure. Measured against that ceiling the controller holds 67.5% of it, covers the terrain's compulsory ground to the metre, and loses 11.5 m where the terrain required nothing — a loss that oracle perception barely touches, which puts the remaining work in the standoff policy rather than in the sensing.</p>
       <p><strong>Scope, stated up front.</strong> One mission class: line-survey transects flown by a hover-capable vehicle over reef slopes, planned on a 2-D manifold valid while heading is roughly constant. Hover capability is what makes zero-speed vertical correction available at all; the straight-transect assumption is what makes the projection sound. A 3-D control law would be a different design, and §7 says what would change. This is a boundary on the claim, not an apology.</p>
     </div>
   </section>
@@ -433,7 +433,7 @@
   </section>
 
   <section>
-    <div class="sec-head"><span class="num">05</span><h2>The ideal trajectory, and the policy it implies</h2></div>
+    <div class="sec-head"><span class="num">05</span><h2>The ideal trajectory, and the measured gap</h2></div>
     <div class="body">
       <p>Because the objective is in-band line over a fixed transect, the ideal is characterisable rather than merely computable, and the characterisation is short.</p>
       <p>Any metre flown while outside the band is a metre of transect not surveyed. So forward motion out of band is only ever justified when it is <em>required</em> — when the vehicle must cross a feature before it may descend, the tail-clearance case. Everywhere else, motion out of band can be deferred at no cost, because the terrain is not going anywhere and the vehicle can correct in place first.</p>
@@ -441,10 +441,79 @@
         <p>Surge if and only if the vehicle is in band, or forward motion is required to clear a feature before it may descend. Correct in place otherwise.</p>
       </div>
       <p>That is the deployed mode structure. <code>ALT_FOLLOW</code> surges in band; the two zero-speed modes hold station out of band; <code>OBSTACLE_HOLD</code> and <code>TAIL_CLEAR</code> surge out of band only while clearing. The controller is not approximating a policy discovered elsewhere — the policy structure falls out of the objective.</p>
-      <p>Two consequences follow, and both are worth more than the characterisation itself.</p>
-      <p><strong>The ideal is analytic per terrain profile.</strong> In-band line equals the transect length, less the segments whose gradient exceeds <code>v<sub>z</sub>/v<sub>x</sub></code>, less the clearance holds each descending edge forces. No numerical optimisation over the mesh is needed to state the ceiling; it can be computed directly from the profile, for synthetic and reconstructed terrain alike.</p>
-      <p><strong>The residual gap is perception, not control.</strong> If the policy structure is optimal given knowledge of the terrain, then whatever the deployed controller loses against the analytic ideal is attributable to acting on a sparse, causal, heading-limited map rather than on the profile itself. That reframes the headline measurement: not "how much better than a baseline" but "how much in-band line does causal sparse sensing cost", which is a quantity with meaning outside this controller.</p>
-      <p>Stated carefully: the exchange argument above is a sketch, not a proof. It assumes the transect is fixed rather than the mission duration, that correcting in place is always available — which is where hover capability enters as a premise rather than a convenience — and that clearance holds are the only compulsory out-of-band motion. Establishing it properly, alongside the liveness property of §6, would give the paper two stated results rather than one, and §8 treats its verification as a first-class experiment rather than an aside.</p>
+      <p><strong>The ideal is analytic per terrain profile.</strong> In-band line equals the transect length, less three compulsory intervals: faces whose gradient exceeds <code>v<sub>z</sub>/v<sub>x</sub></code>, the standoff preceding each rising face, and the half-length plus standoff after each descending edge before the stern has crossed. No numerical optimisation over the mesh is needed to state the ceiling; it follows directly from the profile, for synthetic and reconstructed terrain alike.</p>
+
+      <h3>What the controller achieves against it</h3>
+      <p>On the evaluation terrain — a four-leg lawnmower flown across 70° sawtooth teeth of 20 m relief, three noise seeds — the ceiling is <strong>46.2 m of a 159.2 m surveyed transect</strong>. The other 113.0 m is compulsory: 73.0 m of face too steep to follow, 16.0 m of approach standoff, 24.0 m of tail clearance. The controller holds the band for <strong>31.2 ± 0.7 m</strong>, or 67.5% of the ceiling.</p>
+      <p>The transect is measured from where survey altitude is first reached rather than from launch. The descent from the surface is set by start depth and vertical speed rather than by terrain, and the ideal assumes a vehicle already at altitude, so it is removed from both sides and numerator and denominator span the same ground. This does not flatter the result: that descent runs entirely over a face the ideal already writes off, so the ceiling and the ratio are unchanged by the exclusion.</p>
+
+      <h3>Compulsoriness is tested by position, not by mode name</h3>
+      <p>A ratio alone cannot say whether the missing 15.0 m was ever available. Reading it off the control modes — matching <code>OBSTACLE_HOLD</code> to unfollowable faces, <code>TAIL_CLEAR</code> to clearance — is tempting and wrong, because the modes do not partition the terrain the way the causes do. Done that way the largest error in the run reads as 0.8 m; measured properly it is 9.2 m. So every metre is classified instead by <em>where it was flown</em>: whether the vehicle's along-leg position fell inside one of the ideal's own compulsory intervals.</p>
+    </div>
+
+    <figure>
+      <div class="fig-frame">
+        <svg viewBox="0 0 760 244" role="img" aria-label="Two aligned bars over the same 159.2 metre transect. The upper bar divides the ground into 46.2 metres the terrain leaves followable and 113.0 metres it makes compulsorily out of band. The lower bar shows what the controller did on that same ground: 28.7 metres held in band plus 2.5 metres held in band over compulsory ground, 110.5 metres out of band over compulsory ground, 11.5 metres out of band with no terrain justification, and 6.0 metres of cross-track translation.">
+          <text class="svg-label" x="245.7" y="20" text-anchor="middle">followable — 46.2 m</text>
+          <text class="svg-label" x="472" y="20" text-anchor="middle">compulsorily out of band — 113.0 m</text>
+          <text class="svg-axis" x="52" y="90" text-anchor="end">terrain</text>
+          <rect x="60"    y="70" width="185.7" height="28" fill="var(--ok)" opacity="0.30"/>
+          <rect x="245.7" y="70" width="454.3" height="28" fill="var(--d2)" opacity="0.55"/>
+          <rect x="60"    y="70" width="640"   height="28" fill="none" stroke="var(--rule-firm)"/>
+
+          <line x1="245.7" y1="62" x2="245.7" y2="168" stroke="var(--rule-firm)" stroke-dasharray="3 3"/>
+
+          <text class="svg-axis" x="52" y="148" text-anchor="end">controller</text>
+          <rect x="60"    y="128" width="24.1"  height="28" fill="var(--caution)" opacity="0.55"/>
+          <rect x="84.1"  y="128" width="46.2"  height="28" fill="var(--accent)"/>
+          <rect x="130.3" y="128" width="115.4" height="28" fill="var(--ok)"/>
+          <rect x="245.7" y="128" width="10.1"  height="28" fill="var(--ok)" opacity="0.55"/>
+          <rect x="255.8" y="128" width="444.2" height="28" fill="var(--d2)" opacity="0.55"/>
+          <rect x="60"    y="128" width="640"   height="28" fill="none" stroke="var(--rule-firm)"/>
+
+          <line x1="188"   y1="156" x2="188"   y2="170" stroke="var(--rule-firm)"/>
+          <line x1="478"   y1="156" x2="478"   y2="170" stroke="var(--rule-firm)"/>
+          <text class="svg-label" x="188" y="183" text-anchor="middle">in band 28.7 m</text>
+          <text class="svg-label" x="478" y="183" text-anchor="middle">out of band, compulsory 110.5 m</text>
+
+          <line x1="107.2" y1="156" x2="107.2" y2="190" stroke="var(--accent)"/>
+          <line x1="250.8" y1="156" x2="250.8" y2="190" stroke="var(--rule-firm)"/>
+          <text class="svg-label-em" x="107.2" y="203" text-anchor="middle">avoidable 11.5 m</text>
+          <text class="svg-label" x="250.8" y="203" text-anchor="start" dx="-6">in band over compulsory 2.5 m</text>
+
+          <line x1="72.1" y1="156" x2="72.1" y2="210" stroke="var(--rule-firm)"/>
+          <text class="svg-label" x="72.1" y="223" text-anchor="middle">cross-track 6.0 m</text>
+        </svg>
+      </div>
+      <figcaption>
+        <b>Figure 2 · where the transect goes</b><br>
+        Segments are ordered by class, not by position along the leg. The two rows agree on the compulsory total to the metre — 110.5 m flown out of band over that ground plus 2.5 m recovered in band equals the terrain's 113.0 m — so the entire disagreement is confined to the followable 46.2 m at the left, where 11.5 m is flown out of band with no terrain justification and 6.0 m of cross-track translation is never in band at all.
+      </figcaption>
+    </figure>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th></th><th>Sensed</th><th>Oracle perception</th></tr></thead>
+        <tbody>
+          <tr><td>In-band line</td><td class="num-cell">31.2 ± 0.7 m</td><td class="num-cell">32.4 ± 0.4 m</td></tr>
+          <tr><td>Share of the 46.2 m ceiling</td><td class="num-cell">67.5%</td><td class="num-cell">70.1%</td></tr>
+          <tr><td><strong>Avoidable loss</strong><br><span class="cell-note">out of band, no terrain justification</span></td><td class="num-cell">11.5 m</td><td class="num-cell">10.0 m</td></tr>
+          <tr><td>&nbsp;&nbsp;· in <code>OBSTACLE_HOLD</code></td><td class="num-cell">9.2 m</td><td class="num-cell">9.5 m</td></tr>
+          <tr><td>&nbsp;&nbsp;· in <code>TAIL_CLEAR</code></td><td class="num-cell">2.0 m</td><td class="num-cell">0.4 m</td></tr>
+          <tr><td>&nbsp;&nbsp;· in <code>ALT_FOLLOW</code></td><td class="num-cell">0.3 m</td><td class="num-cell">0.0 m</td></tr>
+          <tr><td>Worst hull clearance</td><td class="num-cell">0.930 m</td><td class="num-cell">0.809 m</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="body">
+      <h3>The residual gap is not perception</h3>
+      <p>An earlier draft of this section conjectured that whatever the controller loses against the analytic ideal is attributable to acting on a sparse, causal, heading-limited map rather than on the profile itself — that the policy is optimal given knowledge, so the gap measures the cost of sensing. The oracle ablation was run to test exactly that, and it does not survive.</p>
+      <p>Replacing beam-derived occupancy with occupancy written from the terrain itself, leaving the controller untouched, moves in-band line from 31.2 m to 32.4 m. That is 2.6 percentage points of a 32.5-point shortfall. Avoidable loss falls from 11.5 m to 10.0 m.</p>
+      <p>The breakdown says why. Of the 11.5 m of avoidable loss, 9.2 m is spent in <code>OBSTACLE_HOLD</code> — and the oracle spends 9.5 m there, marginally <em>more</em>. The dominant recoverable term is untouched by perfect knowledge, because it is not an inference failure: it is the standoff and commitment policy holding out of band longer than the terrain requires. That is a control question, and it is the one worth pursuing.</p>
+      <p>Perception explains one term cleanly. <code>TAIL_CLEAR</code> contributes 2.0 m of avoidable loss under real beams against 0.4 m under the oracle, which is what a noisy upper-envelope estimate of a descending edge should cost. It is also the smaller half of the story, and the oracle buys it at a worse worst-case clearance — 0.809 m against 0.930 m — because a controller that sees more descends sooner.</p>
+      <p><strong>A priced safety premium.</strong> <code>ALT_FOLLOW</code> spends 6.8 m out of band, and the cause is deliberate. The altitude estimate is the minimum vertical component across the Janus beams, which on sloping ground biases the commanded depth a median 2.9 m shallow and binds on 63% of those metres. The manifold is an along-track projection and has no representation for a hazard abeam, so that overstatement is the only thing standing between the vehicle and a wall it is set sideways onto by current — it is not a duplicate of what the obstacle latch already knows, it is the sole evidence the wall exists. The positional test prices the choice: just 0.3 m of the 6.8 m falls on ground that was followable. The premium is paid almost entirely over terrain that was never surveyable, which is the strongest argument available for keeping it.</p>
+      <p>Stated carefully, the exchange argument above is a characterisation, not a proof. It assumes the transect is fixed rather than the mission duration, that correcting in place is always available — which is where hover capability enters as a premise rather than a convenience — that the three intervals above are the only compulsory out-of-band motion, and that the vehicle is a point, which costs about 1.2 m of the measured gap on this terrain. The ceiling is also a ceiling for <em>this</em> policy class: a controller free to creep at <code>v<sub>z</sub>/g</code> could hold the band across a steep face, at a survey rate that would make the imagery useless.</p>
     </div>
   </section>
 
@@ -535,7 +604,7 @@
         </svg>
       </div>
       <figcaption>
-        <b>Figure 2 · why no zero-progress cycle exists</b><br>
+        <b>Figure 3 · why no zero-progress cycle exists</b><br>
         Edge labels use <code>v</code> for vehicle depth, <code>T</code> for the overshoot threshold. The subgraph induced on the two zero-velocity states contains exactly one edge, <code>ALT_CORRECTION → OBSTACLE_CLEAR</code>; the return edge is absent, so that subgraph is acyclic and every path between the two must leave through the forward-progress region above. The self-transitions are bounded separately: <code>ALT_CORRECTION</code> descends against a command bounded by the grid floor, and <code>OBSTACLE_CLEAR</code> ascends toward a monotone target on a discrete grid that is clamped at zero — so each is left in finite time, or the vehicle arrives at the surface with an unreachable target, which is the sole state from which forward motion does not resume.
       </figcaption>
     </figure>    <div class="body">
@@ -596,14 +665,14 @@
       <h3>What belongs in the logic simulation, and in what order</h3>
       <p>All of it before SITL, because every analytic claim in §4 and §5 is cheap to falsify here and expensive to falsify there. A surprise at this stage changes the paper; a surprise after a week of SITL runs changes the paper and wastes the week.</p>
       <ul>
-        <li><strong>1 · Gap to the analytic ideal.</strong> Compute in-band line from the terrain profile — transect length, less unfollowable gradient, less compulsory clearance holds — and measure what the controller achieves against it. This is the headline number and everything else supports it. Sweep tooth angle, amplitude and flat length to map where the gap opens rather than reporting it at one operating point.</li>
-        <li><strong>2 · Oracle-perception ablation.</strong> Run the same controller against a manifold populated directly from the terrain rather than from beams. The difference between oracle and sensed isolates how much of the gap is perception and how much is control, and it is the experiment that tests §5's central conjecture. If the oracle run closes the gap, the policy is optimal and the loss is sensing; if it does not, the policy is not what §5 claims.</li>
+        <li><span class="chip chip-done">run</span> <strong>1 · Gap to the analytic ideal.</strong> In-band line computed from the terrain profile and measured against what the controller achieves: 31.2 m of a 46.2 m ceiling, with every metre classified against the ideal's own compulsory intervals by position (§5). What remains is the sweep — tooth angle, amplitude and flat length — to map where the gap opens rather than reporting it at one operating point.</li>
+        <li><span class="chip chip-done">run</span> <strong>2 · Oracle-perception ablation.</strong> The same controller against a manifold written from the terrain rather than from beams. It answers §5's central conjecture in the negative: in-band line rises only 31.2 → 32.4 m, and the dominant avoidable term is marginally <em>worse</em> under perfect knowledge (9.5 m against 9.2 m). The gap is control, not sensing, which redirects the remaining work onto the standoff and commitment policy.</li>
         <li><strong>3 · The gradient criterion.</strong> Sweep face angle through the predicted 45° boundary at fixed speeds, and through the corresponding boundary at other speed ratios. Either the followable/unfollowable transition sits where <code>v<sub>z</sub>/v<sub>x</sub></code> says it does, or the analysis in §4 is wrong. Cheap, and it validates an equation the paper leans on.</li>
         <li><strong>4 · The straddled-pinnacle fixture.</strong> A pinnacle beneath the hull but not ahead of the nose — the one geometry that exercises §6's liveness guard, which is currently untested by execution. Show the unguarded logic oscillating and the guarded logic escaping.</li>
         <li><strong>5 · Parameter sensitivity.</strong> Vary the physical thresholds one at a time and show behaviour degrades predictably and in the direction the name implies. This is what turns the tuning argument of §7 from an assertion into evidence, and it is only affordable here.</li>
         <li><strong>6 · Degraded sensing.</strong> DVL dropout, altimeter loss, map wipes at turns, non-finite returns. Easy to inject here and awkward to induce in SITL, and it exercises the validity-gating and conservative-command paths that hardening produced.</li>
       </ul>
-      <p>Items 1 and 2 are the paper. Item 3 protects an equation the argument rests on. Items 4 to 6 are each a paragraph in results and a reviewer question pre-empted.</p>
+      <p>Items 1 and 2 are the paper, and both are now run; what they changed is which of the remaining items matters. Item 3 protects an equation the argument rests on. Item 5 is promoted: with the gap shown to be a control property, the standoff and commitment thresholds are where the recoverable 9.2 m lives, so sweeping them is no longer only a tuning-argument exhibit. Items 4 and 6 are each a paragraph in results and a reviewer question pre-empted.</p>
 
       <h3>What SITL adds, and why it comes second</h3>
       <p>Real vehicle dynamics rather than a kinematic model, real timing and message latency, sensor plugins in place of ray casts, and mesh geometry that a height field cannot express — overhangs among it. None of those change the analytic claims; they establish that the claims survive a realistic stack and real reef geometry. Running them before the logic simulation has settled items 1 to 3 would be measuring an unvalidated hypothesis at fifty times the cost per run.</p>
@@ -646,7 +715,7 @@
       </div></li>
       <li><span class="o-num">III</span><div>
         <p class="o-title">Problem and the ideal trajectory · ~1 pp</p>
-        <p class="o-note">§5: in-band line as objective, the followable-gradient criterion, the compulsory clearance hold, and the surge-iff-in-band characterisation with its assumptions stated. This is the section that makes the evaluation meaningful.</p>
+        <p class="o-note">§5: in-band line as objective, the followable-gradient criterion, the three compulsory intervals, and the surge-iff-in-band characterisation with its assumptions stated — then the measured gap against it, classified positionally. This is the section that makes the evaluation meaningful, and it carries the result that the residual is control rather than perception.</p>
       </div></li>
       <li><span class="o-num">IV</span><div>
         <p class="o-title">Representation · ~1 pp</p>

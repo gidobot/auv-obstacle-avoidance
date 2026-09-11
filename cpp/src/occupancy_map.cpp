@@ -674,7 +674,14 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
                 cliff_top_commit_heading_ = last_vehicle_heading_;
             }
         }
-        cliff_top_release_x_ = cliff_top_target_x_ + c.cliff_standoff + c.vehicle_length;
+        // Half a vehicle length, not a whole one: release_x is compared against
+        // the vehicle origin, and the stern has crossed the peak once the origin
+        // is half a length beyond it.  Using the full length held the latch a
+        // metre longer than the geometry requires on every descending edge,
+        // which measured as roughly eight metres of in-band survey line over a
+        // four-leg pattern — the largest single recoverable loss against the
+        // terrain-defined ceiling.
+        cliff_top_release_x_ = cliff_top_target_x_ + c.cliff_standoff + c.vehicle_length / 2.0;
     } else if (cliff_top_committed_) {
         // Wide scan using imaging_altitude as depth threshold
         auto wide = forward_obstacle(vehicle_depth, vehicle_world_x,
@@ -687,7 +694,7 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
                     cliff_top_target_x_ = wide.peak_world_x;
                     cliff_top_commit_heading_ = last_vehicle_heading_;
                 }
-                cliff_top_release_x_ = cliff_top_target_x_ + c.cliff_standoff + c.vehicle_length;
+                cliff_top_release_x_ = cliff_top_target_x_ + c.cliff_standoff + c.vehicle_length / 2.0;
             }
             // else: terrain at or below imaging_altitude — keep latch so the
             // tail clears the highest obstacle voxel before the altimeter

@@ -108,8 +108,8 @@ def tp_factory(cfg, dvl, sonar, alt):
 
 def tp_dwell_factory(cfg, dvl, sonar, alt):
     # Dwell sized to the committed traverse the geometry demands:
-    # (cliff_standoff + vehicle_length) / survey_speed.
-    hold = (cfg.cliff_standoff + cfg.vehicle_length) / max(cfg.survey_speed, 1e-6)
+    # (cliff_standoff + vehicle_length/2) / survey_speed.
+    hold = (cfg.cliff_standoff + cfg.vehicle_length / 2.0) / max(cfg.survey_speed, 1e-6)
     return TaskPriorityMapper(cfg, dvl, sonar, alt, dwell_s=hold)
 
 def tp_stop_factory(cfg, dvl, sonar, alt):
@@ -140,7 +140,7 @@ def tp_both_factory(cfg, dvl, sonar, alt):
     # unnecessary — if task priority plus these two rules matches the deployed
     # controller, the mode structure is one way of writing something the
     # formalism can also express, and the paper must say so.
-    hold = (cfg.cliff_standoff + cfg.vehicle_length) / max(cfg.survey_speed, 1e-6)
+    hold = (cfg.cliff_standoff + cfg.vehicle_length / 2.0) / max(cfg.survey_speed, 1e-6)
     return TaskPriorityMapper(cfg, dvl, sonar, alt, dwell_s=hold,
                               stop_to_converge=True)
 
@@ -332,7 +332,7 @@ def sweep_speed(rows, seeds):
 def sweep_dwell(rows, seeds):
     """Vary commitment against fixed sequencing; test for a Pareto escape."""
     cfg0 = cpp.OccupancyMapConfig()
-    natural = (cfg0.cliff_standoff + cfg0.vehicle_length) / max(cfg0.survey_speed, 1e-6)
+    natural = (cfg0.cliff_standoff + cfg0.vehicle_length / 2.0) / max(cfg0.survey_speed, 1e-6)
     header(f"dwell sweep · sequencing on throughout · natural hold = {natural:g} s",
            len(seeds))
 

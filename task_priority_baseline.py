@@ -236,14 +236,14 @@ class TaskPriorityMapper:
 
         Mirrors the deployed latch: the depth target ratchets shallower only,
         the peak ratchets forward only, and release is position-gated at
-        peak + cliff_standoff + vehicle_length.  Returns the held target depth
+        peak + cliff_standoff + vehicle_length/2.  Returns the held target depth
         while committed, NaN otherwise.
         """
         c = self.cfg
         omap = self._inner.omap
         v_x = omap.grid_to_world_x(omap.cx)
 
-        if self._latched and v_x >= self._latch_peak_x + c.cliff_standoff + c.vehicle_length:
+        if self._latched and v_x >= self._latch_peak_x + c.cliff_standoff + c.vehicle_length / 2.0:
             self._latched = False
             self._latch_peak_x = np.nan
             self._latch_target_z = np.nan

@@ -24,6 +24,15 @@ Runs terminate on transect completion rather than on a step budget: in-band
 line is a per-transect quantity and a step-limited run would measure a partial
 pattern against a whole-pattern ceiling.
 
+Two measurement details matter enough to state.  The simulator integrates
+kinematics from the velocity cached by the *previous* control tick, so distance
+covered during a step belongs to the mode computed one step earlier; attributing
+it to the mode read afterwards puts several metres into modes that command zero
+speed.  And the descent from the surface is part of the transect, not something
+to drop — excluding it would measure a shortened run against a whole-transect
+ceiling — so it is counted and reported under its own heading rather than
+silently skipped.
+
 Usage:
     python evaluate_gap.py                 # nominal terrain, sensed vs oracle
     python evaluate_gap.py --sweep angle   # gap across face steepness
@@ -161,6 +170,13 @@ def pattern_ideal(terrain3d, cfg):
 # ── run to transect completion ───────────────────────────────────────────────
 
 def run(terrain3d, cfg, factory, seed=0, dt=0.1, alt_tol=0.5, max_s=4000.0):
+    """Fly the pattern to completion; return in-band line and its accounting.
+
+    Distance is attributed to the mode that *produced* it — the one computed on
+    the previous control tick — because the simulator moves on a cached velocity
+    command.  The whole transect is accounted for, including the descent from
+    the surface before survey altitude is first reached.
+    """
     np.random.seed(seed)
     traj, _ = make_lawnmower_trajectory(survey_speed=cfg.survey_speed,
                                         turn_rate=0.0, **LAWNMOWER)
@@ -172,28 +188,39 @@ def run(terrain3d, cfg, factory, seed=0, dt=0.1, alt_tol=0.5, max_s=4000.0):
 
     half = cfg.vehicle_length / 2.0
     offs = np.linspace(-half, half, 9)
-    in_band, prev_arc, worst, on_survey = 0.0, 0.0, 9e9, False
+    in_band, prev_arc, worst = 0.0, 0.0, 9e9
+    on_survey = False
+    oob = {}
+    prev_mode = sim.mapper.omap.control_mode      # the mode that moves step one
     steps = int(max_s / dt)
 
     for _ in range(steps):
         sim.step(dt)
-        nadir = terrain3d(sim.vehicle_x, sim.vehicle_y) - sim.vehicle_z
-        if not on_survey:
-            if np.isfinite(nadir) and nadir <= cfg.imaging_altitude + 1.0:
-                on_survey, prev_arc = True, float(sim.arc_length)
-            continue
         d_arc = max(0.0, float(sim.arc_length) - prev_arc)
         prev_arc = float(sim.arc_length)
-        if abs(nadir - cfg.imaging_altitude) <= alt_tol:
+        nadir = terrain3d(sim.vehicle_x, sim.vehicle_y) - sim.vehicle_z
+
+        if not on_survey and np.isfinite(nadir) and nadir <= cfg.imaging_altitude + 1.0:
+            on_survey = True
+
+        if not on_survey:
+            oob["descent from surface"] = oob.get("descent from surface", 0.0) + d_arc
+        elif abs(nadir - cfg.imaging_altitude) <= alt_tol:
             in_band += d_arc
+        else:
+            oob[prev_mode] = oob.get(prev_mode, 0.0) + d_arc
+
+        prev_mode = sim.mapper.omap.control_mode
+
         h = sim.vehicle_heading
         hull = [terrain3d(sim.vehicle_x + o*math.cos(h), sim.vehicle_y + o*math.sin(h))
                 for o in offs]
-        worst = min(worst, float(np.min(np.asarray(hull) - sim.vehicle_z)))
+        if on_survey:
+            worst = min(worst, float(np.min(np.asarray(hull) - sim.vehicle_z)))
         if sim.arc_length >= path_len - 1e-6:
             break
 
-    return {"in_band": in_band, "arc": float(sim.arc_length),
+    return {"in_band": in_band, "arc": float(sim.arc_length), "oob": oob,
             "complete": sim.arc_length >= path_len - 1e-6, "worst": worst}
 
 
@@ -206,15 +233,26 @@ def evaluate(cfg, terrain3d, seeds, label):
         sd = float(np.std([r["in_band"] for r in rs]))
         done = all(r["complete"] for r in rs)
         worst = float(np.min([r["worst"] for r in rs]))
-        rows.append((name, ib, sd, 100*ib/ideal if ideal else float("nan"), worst, done))
+        oob = {}
+        for r in rs:
+            for k, v in r["oob"].items():
+                oob[k] = oob.get(k, 0.0) + v / len(rs)
+        rows.append((name, ib, sd, 100*ib/ideal if ideal else float("nan"), worst, done, oob))
     print(f"\n{label}")
     print(f"  transect {length:.1f} m   analytic ideal {ideal:.1f} m "
           f"({100*ideal/length:.1f}% of transect)")
     print(f"    lost to: " + "  ".join(f"{k} {v:.1f} m" for k, v in sorted(lost.items())))
     print(f"  {'run':<8} {'in-band m':>10} {'% of ideal':>11} {'worst clr':>10} {'completed':>10}")
     print(f"  {'-'*8} {'-'*10} {'-'*11} {'-'*10} {'-'*10}")
-    for name, ib, sd, pct, worst, done in rows:
+    for name, ib, sd, pct, worst, done, _ in rows:
         print(f"  {name:<8} {ib:6.1f}±{sd:<3.1f} {pct:10.1f}% {worst:10.3f} {str(done):>10}")
+    for name, ib, _, _, _, _, oob in rows:
+        total = ib + sum(oob.values())
+        print(f"\n  {name}: where the {length:.0f} m went "
+              f"(accounted {total:.1f} m)")
+        print(f"     {'in band':<22} {ib:7.1f} m")
+        for k, v in sorted(oob.items(), key=lambda kv: -kv[1]):
+            print(f"     {k:<22} {v:7.1f} m")
     return ideal, rows
 
 

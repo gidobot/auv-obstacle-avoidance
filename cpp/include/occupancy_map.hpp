@@ -39,7 +39,7 @@
 //   Mode: OBSTACLE_HOLD  (latch active, vehicle at or above target depth)
 //     Vehicle flies forward at survey_speed holding the latch target depth
 //     (DEPTH_HOLD).  Active until the vehicle passes release_x (target_x +
-//     cliff_standoff + vehicle_length m).  The latch can only be updated
+//     cliff_standoff + vehicle_length/2 m).  The latch can only be updated
 //     to a shallower target — never overridden or released early.
 //
 //   Mode: ALT_CORRECTION  (altitude diverges above imaging altitude target)
@@ -395,7 +395,7 @@ public:
     ///     Commit: when the vehicle has crossed over the highest detected
     ///     voxel within `cliff_standoff`, latch on.  Hold target depth
     ///     (= peak_z - imaging) and fly forward
-    ///     `cliff_standoff + vehicle_length` m at constant depth so
+    ///     `cliff_standoff + vehicle_length/2` m at constant depth so
     ///     the tail clears the cliff edge.  During the forward-hold, if any
     ///     DVL beam reads altitude < `imaging_altitude`, ratchet target
     ///     shallower to maintain that minimum (vehicle never descends in

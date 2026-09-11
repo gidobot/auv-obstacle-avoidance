@@ -28,10 +28,17 @@ Two measurement details matter enough to state.  The simulator integrates
 kinematics from the velocity cached by the *previous* control tick, so distance
 covered during a step belongs to the mode computed one step earlier; attributing
 it to the mode read afterwards puts several metres into modes that command zero
-speed.  And the descent from the surface is part of the transect, not something
-to drop — excluding it would measure a shortened run against a whole-transect
-ceiling — so it is counted and reported under its own heading rather than
-silently skipped.
+speed.
+
+And the transect is measured from where survey altitude is first reached, not
+from the launch point.  The descent from the surface is a deployment transient
+whose length is set by the start depth and the vehicle's vertical speed, not by
+the terrain, and the analytic ideal has no model for it — it assumes a vehicle
+already at altitude.  Counting those metres against a ceiling that never
+budgeted for them charges the controller for the launch.  They are therefore
+removed from *both* sides: the ideal is recomputed over the same shortened first
+leg, so numerator and denominator span the same ground.  The excluded distance
+is reported so the exclusion stays visible.
 
 Usage:
     python evaluate_gap.py                 # nominal terrain, sensed vs oracle
@@ -135,17 +142,21 @@ def oracle_factory(terrain_fn):
 
 # ── ideal over a lawnmower pattern ───────────────────────────────────────────
 
-def pattern_ideal(terrain3d, cfg):
+def pattern_ideal(terrain3d, cfg, skip=0.0):
     """Analytic in-band ceiling for the whole lawnmower, leg by leg.
 
     Legs alternate direction, and a sawtooth traversed backwards is not the same
     profile — a gradual rise becomes a vertical drop — so each leg is evaluated
     along its own direction of travel.  Cross-track legs run perpendicular to
     the teeth, where the profile is constant and therefore wholly followable.
+
+    `skip` drops the leading metres of the first leg, so the ceiling spans the
+    same ground as a run measured from where survey altitude is first reached
+    rather than from the launch point.
     """
     leg, n_legs = LAWNMOWER["leg_length"], LAWNMOWER["n_legs"]
     spacing = LAWNMOWER["spacing"]
-    total_in_band, total_len, lost = 0.0, 0.0, {}
+    total_in_band, total_len, lost, per_leg = 0.0, 0.0, {}, []
 
     for i in range(n_legs):
         y = i * spacing
@@ -154,7 +165,8 @@ def pattern_ideal(terrain3d, cfg):
             prof = lambda s, y=y: terrain3d(s, y)
         else:
             prof = lambda s, y=y, leg=leg: terrain3d(leg - s, y)
-        r = analytic_ideal(prof, 0.0, leg, cfg)
+        r = analytic_ideal(prof, skip if i == 0 else 0.0, leg, cfg)
+        per_leg.append(r.intervals)
         total_in_band += r.in_band
         total_len += r.length
         for k, v in r.lost.items():
@@ -164,18 +176,33 @@ def pattern_ideal(terrain3d, cfg):
     cross = spacing * (n_legs - 1)
     total_in_band += cross
     total_len += cross
-    return total_in_band, total_len, lost
+    return total_in_band, total_len, lost, per_leg
 
 
 # ── run to transect completion ───────────────────────────────────────────────
 
-def run(terrain3d, cfg, factory, seed=0, dt=0.1, alt_tol=0.5, max_s=4000.0):
+def leg_position(arc, leg_len, spacing):
+    """Map pattern arc length to (leg index, distance along leg).
+
+    Returns (None, None) on a cross-track segment.  Derived from arc rather
+    than from coordinates so it does not have to re-derive the trajectory's
+    turn geometry.
+    """
+    period = leg_len + spacing
+    k = int(arc // period)
+    within = arc - k * period
+    return (k, within) if within <= leg_len else (None, None)
+
+
+def run(terrain3d, cfg, factory, seed=0, dt=0.1, alt_tol=0.5, max_s=4000.0,
+        per_leg=None):
     """Fly the pattern to completion; return in-band line and its accounting.
 
     Distance is attributed to the mode that *produced* it — the one computed on
     the previous control tick — because the simulator moves on a cached velocity
-    command.  The whole transect is accounted for, including the descent from
-    the surface before survey altitude is first reached.
+    command.  The descent from the surface is returned separately rather than
+    bucketed, because the surveyed transect begins where survey altitude is
+    first reached.
     """
     np.random.seed(seed)
     traj, _ = make_lawnmower_trajectory(survey_speed=cfg.survey_speed,
@@ -188,7 +215,8 @@ def run(terrain3d, cfg, factory, seed=0, dt=0.1, alt_tol=0.5, max_s=4000.0):
 
     half = cfg.vehicle_length / 2.0
     offs = np.linspace(-half, half, 9)
-    in_band, prev_arc, worst = 0.0, 0.0, 9e9
+    in_band, prev_arc, worst, descent = 0.0, 0.0, 9e9, 0.0
+    cls = {}
     on_survey = False
     oob = {}
     prev_mode = sim.mapper.omap.control_mode      # the mode that moves step one
@@ -204,11 +232,33 @@ def run(terrain3d, cfg, factory, seed=0, dt=0.1, alt_tol=0.5, max_s=4000.0):
             on_survey = True
 
         if not on_survey:
-            oob["descent from surface"] = oob.get("descent from surface", 0.0) + d_arc
+            descent += d_arc
         elif abs(nadir - cfg.imaging_altitude) <= alt_tol:
             in_band += d_arc
         else:
             oob[prev_mode] = oob.get(prev_mode, 0.0) + d_arc
+
+        # Positional test: was this metre one the terrain *required* to be flown
+        # out of band?  Compares the vehicle's along-leg position against the
+        # ideal's own compulsory intervals, instead of assuming a mapping from
+        # control modes onto the ideal's causes.
+        if on_survey and per_leg is not None:
+            k, s_leg = leg_position(float(sim.arc_length), LAWNMOWER["leg_length"],
+                                    LAWNMOWER["spacing"])
+            band_ok = abs(nadir - cfg.imaging_altitude) <= alt_tol
+            if k is None or k >= len(per_leg):
+                key = "cross-track"
+            else:
+                compulsory = any(a <= s_leg <= b for a, b, _ in per_leg[k])
+                if band_ok:
+                    key = "in band (over compulsory)" if compulsory else "in band"
+                else:
+                    key = "out of band, compulsory" if compulsory else \
+                          "out of band, AVOIDABLE"
+                    if not compulsory:
+                        mk = "   avoidable in " + prev_mode
+                        cls[mk] = cls.get(mk, 0.0) + d_arc
+            cls[key] = cls.get(key, 0.0) + d_arc
 
         prev_mode = sim.mapper.omap.control_mode
 
@@ -221,14 +271,29 @@ def run(terrain3d, cfg, factory, seed=0, dt=0.1, alt_tol=0.5, max_s=4000.0):
             break
 
     return {"in_band": in_band, "arc": float(sim.arc_length), "oob": oob,
-            "complete": sim.arc_length >= path_len - 1e-6, "worst": worst}
+            "complete": sim.arc_length >= path_len - 1e-6, "worst": worst,
+            "descent": descent, "cls": cls}
 
 
 def evaluate(cfg, terrain3d, seeds, label):
-    ideal, length, lost = pattern_ideal(terrain3d, cfg)
-    rows = []
+    """Run both perception variants and report each against its own ceiling.
+
+    The ceiling is recomputed per run over that run's surveyed transect — the
+    pattern less its launch descent — so the ratio compares a run against the
+    ideal for the ground it actually covered.  The descent is terrain-
+    independent, so the per-run ceilings differ only marginally; the spread is
+    reported rather than assumed away.
+    """
+    # Intervals are taken at skip=0: the launch descent is already excluded from
+    # the classifier by the on_survey gate, and clipping leg 0 does not alter
+    # any interval lying beyond the clip.
+    per_leg = pattern_ideal(terrain3d, cfg)[3]
+    rows, ideals, lengths, skips = [], [], [], []
     for name, fac in (("sensed", latch_factory), ("oracle", oracle_factory(terrain3d))):
-        rs = [run(terrain3d, cfg, fac, seed=s) for s in seeds]
+        rs = [run(terrain3d, cfg, fac, seed=s, per_leg=per_leg) for s in seeds]
+        per = [pattern_ideal(terrain3d, cfg, skip=r["descent"]) for r in rs]
+        pcts = [100*r["in_band"]/i if i else float("nan")
+                for r, (i, _, _, _) in zip(rs, per)]
         ib = float(np.mean([r["in_band"] for r in rs]))
         sd = float(np.std([r["in_band"] for r in rs]))
         done = all(r["complete"] for r in rs)
@@ -237,22 +302,49 @@ def evaluate(cfg, terrain3d, seeds, label):
         for r in rs:
             for k, v in r["oob"].items():
                 oob[k] = oob.get(k, 0.0) + v / len(rs)
-        rows.append((name, ib, sd, 100*ib/ideal if ideal else float("nan"), worst, done, oob))
+        ideals += [i for i, _, _, _ in per]
+        lengths += [l for _, l, _, _ in per]
+        skips += [r["descent"] for r in rs]
+        lost = {}
+        for _, _, lo, _ in per:
+            for k, v in lo.items():
+                lost[k] = lost.get(k, 0.0) + v / len(per)
+        cls = {}
+        for r in rs:
+            for k, v in r["cls"].items():
+                cls[k] = cls.get(k, 0.0) + v / len(rs)
+        rows.append((name, ib, sd, float(np.mean(pcts)), worst, done, oob,
+                     float(np.mean([l for _, l, _, _ in per])), lost, cls))
+
+    length = float(np.mean(lengths))
+    ideal  = float(np.mean(ideals))
+    skip   = float(np.mean(skips))
+    lost = rows[0][8]
     print(f"\n{label}")
-    print(f"  transect {length:.1f} m   analytic ideal {ideal:.1f} m "
-          f"({100*ideal/length:.1f}% of transect)")
+    print(f"  surveyed transect {length:.1f} m "
+          f"(pattern {length + skip:.1f} m less {skip:.1f} m launch descent)")
+    print(f"  analytic ideal {ideal:.1f} m ({100*ideal/length:.1f}% of transect)")
     print(f"    lost to: " + "  ".join(f"{k} {v:.1f} m" for k, v in sorted(lost.items())))
     print(f"  {'run':<8} {'in-band m':>10} {'% of ideal':>11} {'worst clr':>10} {'completed':>10}")
     print(f"  {'-'*8} {'-'*10} {'-'*11} {'-'*10} {'-'*10}")
-    for name, ib, sd, pct, worst, done, _ in rows:
+    for name, ib, sd, pct, worst, done, _, _, _, _ in rows:
         print(f"  {name:<8} {ib:6.1f}±{sd:<3.1f} {pct:10.1f}% {worst:10.3f} {str(done):>10}")
-    for name, ib, _, _, _, _, oob in rows:
+    for name, ib, _, _, _, _, oob, ln, _, cls in rows:
         total = ib + sum(oob.values())
-        print(f"\n  {name}: where the {length:.0f} m went "
-              f"(accounted {total:.1f} m)")
+        print(f"\n  {name}: where the {ln:.1f} m went (accounted {total:.1f} m)")
         print(f"     {'in band':<22} {ib:7.1f} m")
         for k, v in sorted(oob.items(), key=lambda kv: -kv[1]):
             print(f"     {k:<22} {v:7.1f} m")
+        print(f"     -- against the ideal's own compulsory intervals --")
+        for k in ("in band", "in band (over compulsory)", "out of band, compulsory",
+                  "out of band, AVOIDABLE", "cross-track"):
+            if k in cls:
+                print(f"     {k:<28} {cls[k]:7.1f} m")
+            if k == "out of band, AVOIDABLE":
+                for mk, mv in sorted((x for x in cls.items()
+                                      if x[0].startswith("   avoidable")),
+                                     key=lambda kv: -kv[1]):
+                    print(f"     {mk:<28} {mv:7.1f} m")
     return ideal, rows
 
 

@@ -6,7 +6,7 @@
 #include "occupancy_map.hpp"
 
 namespace py = pybind11;
-using namespace auv_oavoid;
+using namespace oa_mapper;
 
 // ---------------------------------------------------------------------------
 // Helper: convert std::vector<bool> to numpy bool array
@@ -48,7 +48,7 @@ static std::optional<std::vector<bool>> obj_to_opt_bool(py::object obj) {
 // Module definition
 // ---------------------------------------------------------------------------
 PYBIND11_MODULE(occupancy_map_cpp, m) {
-    m.doc() = "C++ port of AUV obstacle avoidance occupancy map (auv_oavoid)";
+    m.doc() = "C++ port of the AUV obstacle-avoidance occupancy map (oa_mapper)";
 
     // -----------------------------------------------------------------------
     // OccupancyMapConfig

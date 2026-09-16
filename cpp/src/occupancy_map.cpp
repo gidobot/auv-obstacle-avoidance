@@ -7,7 +7,7 @@
 #include <sstream>
 #include <iomanip>
 
-namespace auv_oavoid {
+namespace oa_mapper {
 
 // ===========================================================================
 // DVLConfig helpers
@@ -1170,4 +1170,4 @@ double ObstacleMapper::get_altitude() {
     return std::min(dvl_alt, altimeter_altitude_);
 }
 
-} // namespace auv_oavoid
+} // namespace oa_mapper

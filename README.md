@@ -105,7 +105,7 @@ deliberate.
 
 | Target | Type | Description |
 |--------|------|-------------|
-| `auv_oavoid` | Static library | Core C++ implementation, linkable into other C++ projects |
+| `oa_mapper_core` | Static library | Core C++ implementation, linkable into other C++ projects |
 | `occupancy_map_cpp` | Python extension | pybind11 bindings — drop-in replacement for `occupancy_map.py` |
 
 ### Use the C++ binding from Python
@@ -120,19 +120,23 @@ config.dz = 0.25
 omap = OccupancyMap(config)
 ```
 
-### Link against `auv_oavoid` from another CMake project
+### Link against `oa_mapper_core` from another CMake project
 
-`auv_oavoid` is the LCM-free, Python-free core.  Add the `cpp/` directory as a
-subdirectory and link the target:
+`oa_mapper_core` is the LCM-free, Python-free core.  Add the `cpp/` directory as
+a subdirectory and link the target:
 
 ```cmake
 add_subdirectory(path/to/auv-obstacle-avoidance/cpp)
-target_link_libraries(my_target PRIVATE auv_oavoid)
+target_link_libraries(my_target PRIVATE oa_mapper_core)
 ```
 
 The Python extension is skipped automatically when this project is consumed
 this way — pybind11 and a matching Python are not needed by a consumer, only
-Eigen.  (Force it either way with `-DAUV_OAVOID_BUILD_PYTHON=ON/OFF`.)
+Eigen.  (Force it either way with `-DOA_MAPPER_BUILD_PYTHON=ON/OFF`.)
+
+The target is `oa_mapper_core` rather than `oa_mapper` because CMake target
+names are global to a project and `acfr-lcm` already has an executable called
+`oa-mapper` — the node itself.
 
 There is no installed CMake package to `find_package`, by design: the core is
 two files, and consumers pin a version by vendoring this repo as a git
@@ -142,7 +146,7 @@ submodule rather than by installing it.
 
 `acfr-lcm`'s `oa-mapper` node consumes this repo as a submodule at
 `src/acfr/oa-mapper/auv-obstacle-avoidance`, pinned to a specific commit.  The
-node builds `oa_mapper.cpp` against `auv_oavoid` from that submodule, so the
+node builds `oa_mapper.cpp` against `oa_mapper_core` from that submodule, so the
 algorithm running on the vehicle is exactly the revision recorded by the
 submodule pointer.
 

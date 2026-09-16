@@ -62,7 +62,7 @@
 // Usage — the grid directly:
 //
 //     #include "occupancy_map.hpp"
-//     using namespace auv_oavoid;
+//     using namespace oa_mapper;
 //
 //     OccupancyMap omap{OccupancyMapConfig{}};
 //     omap.update_dvl_ray(ranges, beam_angles, vehicle_depth, vehicle_world_x);
@@ -98,7 +98,7 @@
 #include <utility>
 #include <vector>
 
-namespace auv_oavoid {
+namespace oa_mapper {
 
 static constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
@@ -647,4 +647,4 @@ private:
     double vehicle_forward_x() const;
 };
 
-} // namespace auv_oavoid
+} // namespace oa_mapper

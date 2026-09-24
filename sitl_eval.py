@@ -159,13 +159,77 @@ def cmd_record(args):
             print(f"contacts: UNAVAILABLE ({exc}) -- recording without them",
                   file=sys.stderr)
 
-    print(f"recording {V} for {args.duration:.0f}s ... (ctrl-C to stop early)")
+    def write_npz():
+        """Serialise whatever has been recorded so far."""
+        if not rows:
+            return
+        snap = list(rows)                      # the LCM callback may still append
+        modes = sorted({r[9] for r in snap})
+        mode_ix = {m: i for i, m in enumerate(modes)}
+        a = lambda i, dt=float: np.array([r[i] for r in snap], dtype=dt)
+        np.savez_compressed(
+            args.out,
+            schema=SCHEMA,
+            t=a(0) - snap[0][0], x=a(1), y=a(2), depth=a(3), altitude=a(4),
+            heading=a(5), vx=a(6), contact=a(7, np.int8), n_contact=a(8, np.int16),
+            mode=np.array([mode_ix[r[9]] for r in snap], dtype=np.int16),
+            mode_names=np.array(modes, dtype=object),
+            oa_vx=a(10), oa_target=a(11), filter_heading=a(12),
+            meta=json.dumps({"vehicle": V, "label": args.label,
+                             "duration_s": snap[-1][0] - snap[0][0],
+                             "samples": len(snap),
+                             "contacts_recorded": not args.no_contacts}),
+        )
+
+    # SIGTERM as well as SIGINT: a long run is more likely to be stopped with
+    # `docker stop` or `kill` than with ctrl-C, and an unwritten .npz would
+    # throw the whole run away.
+    import signal
+    halt = {"now": False}
+
+    def _stop(signum, frame):
+        halt["now"] = True
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _stop)
+        except (ValueError, OSError):
+            pass
+
+    unlimited = args.duration <= 0
+    print(f"recording {V} "
+          + ("until interrupted" if unlimited else f"for {args.duration:.0f}s")
+          + " ... (ctrl-C, or SIGTERM, to stop and write)")
     t0 = time.time()
+    last_report = last_save = t0
     try:
-        while time.time() - t0 < args.duration:
-            lc.handle_timeout(200)
+        while not halt["now"] and (unlimited or time.time() - t0 < args.duration):
+            try:
+                lc.handle_timeout(200)
+            except OSError:
+                # A signal interrupts the poll inside lcm_handle_timeout, which
+                # surfaces as OSError.  Python may not have run the handler yet
+                # when the exception propagates, so yield briefly and re-check
+                # before deciding this is a real transport error.
+                time.sleep(0.05)
+                if halt["now"]:
+                    break
+                raise
+            now = time.time()
+            if now - last_report >= args.progress > 0:
+                last_report = now
+                band = sum(1 for r in rows
+                           if r[4] == r[4] and abs(r[4] - args.altitude) <= args.band)
+                touch = sum(1 for r in rows if r[7])
+                print(f"  {now-t0:6.0f}s  {len(rows):6d} samples  "
+                      f"in band {100*band/max(len(rows),1):5.1f}%  "
+                      f"contact samples {touch}", flush=True)
+            if args.autosave > 0 and now - last_save >= args.autosave:
+                last_save = now
+                write_npz()
     except KeyboardInterrupt:
-        print("\ninterrupted")
+        pass
+    if halt["now"]:
+        print("\nstopping on signal")
     stop.set()
 
     # Shut ROS down deliberately.  Leaving the spin thread running as a daemon
@@ -186,22 +250,7 @@ def cmd_record(args):
               file=sys.stderr)
         return 1
 
-    modes = sorted({r[9] for r in rows})
-    mode_ix = {m: i for i, m in enumerate(modes)}
-    a = lambda i, dt=float: np.array([r[i] for r in rows], dtype=dt)
-    np.savez_compressed(
-        args.out,
-        schema=SCHEMA,
-        t=a(0) - rows[0][0], x=a(1), y=a(2), depth=a(3), altitude=a(4),
-        heading=a(5), vx=a(6), contact=a(7, np.int8), n_contact=a(8, np.int16),
-        mode=np.array([mode_ix[r[9]] for r in rows], dtype=np.int16),
-        mode_names=np.array(modes, dtype=object),
-        oa_vx=a(10), oa_target=a(11), filter_heading=a(12),
-        meta=json.dumps({"vehicle": V, "label": args.label,
-                         "duration_s": time.time() - t0,
-                         "samples": len(rows),
-                         "contacts_recorded": not args.no_contacts}),
-    )
+    write_npz()
     print(f"wrote {args.out}  ({len(rows)} samples, {time.time()-t0:.0f}s)")
     return 0
 
@@ -377,7 +426,16 @@ def main():
     r = sub.add_parser("record", help="record a run (inside seeker-gazebo)")
     r.add_argument("out")
     r.add_argument("--vehicle", default="SEEKER-SITL")
-    r.add_argument("--duration", type=float, default=600.0)
+    r.add_argument("--duration", type=float, default=0.0,
+                   help="seconds; 0 or less records until interrupted (default)")
+    r.add_argument("--progress", type=float, default=30.0,
+                   help="seconds between progress lines; 0 to silence")
+    r.add_argument("--autosave", type=float, default=60.0,
+                   help="seconds between intermediate writes; 0 to disable")
+    r.add_argument("--altitude", type=float, default=2.0,
+                   help="target altitude, for the progress line only")
+    r.add_argument("--band", type=float, default=0.5,
+                   help="band half-width, for the progress line only")
     r.add_argument("--label", default="", help="name for the report table")
     r.add_argument("--contact-topic", default="/seeker/contacts")
     r.add_argument("--no-contacts", action="store_true")

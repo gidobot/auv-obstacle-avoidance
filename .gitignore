@@ -8,3 +8,7 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
+
+# SITL recordings (sitl_eval.py record)
+runs/
+*.npz

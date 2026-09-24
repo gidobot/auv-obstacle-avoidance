@@ -54,10 +54,22 @@ import numpy as np
 
 SCHEMA = 1
 
+# Where the acfr-lcm generated Python types may live.  The OA types
+# (auv_oa_command_t) exist only in the acfr-lcm build tree -- the acfr-lcm-types
+# package installed in the seeker-gazebo image does not carry them -- so without
+# one of these the control_mode column silently records as empty and the
+# per-mode breakdown is lost.  Globbed for the python3.* directory because the
+# build tree is generated against whatever Python built it.
+LCMTYPE_ROOTS = [
+    "/acfr-lcm/build/lib/python3.*/dist-packages/perls/lcmtypes",
+    "/root/git/acfr-lcm/build/lib/python3.*/dist-packages/perls/lcmtypes",
+]
+
 
 # ── recording (needs the sim's ROS + LCM stacks) ─────────────────────────────
 
 def cmd_record(args):
+    import glob
     import importlib.util as ilu
     import os
     import threading
@@ -73,20 +85,27 @@ def cmd_record(args):
         package, which is what the seeker-gazebo image ships -- enough for the
         nav types, so a run can be recorded there without mounting anything.
         """
-        path = os.path.join(args.lcmtypes, pkg, name + ".py")
-        if os.path.exists(path):
-            spec = ilu.spec_from_file_location(name, path)
-            mod = ilu.module_from_spec(spec)
-            sys.modules[name] = mod
-            spec.loader.exec_module(mod)
-            return getattr(mod, name)
+        roots = [args.lcmtypes] if args.lcmtypes else []
+        roots += [r for r in LCMTYPE_ROOTS if r not in roots]
+        for root in roots:
+            for cand in glob.glob(os.path.join(root, pkg, name + ".py")):
+                spec = ilu.spec_from_file_location(name, cand)
+                mod = ilu.module_from_spec(spec)
+                sys.modules[name] = mod
+                spec.loader.exec_module(mod)
+                return getattr(mod, name)
         return getattr(__import__(pkg, fromlist=[name]), name)
 
     nav_t = load("acfrlcm", "auv_acfr_nav_t")
     try:
         oa_cmd_t = load("acfrlcm", "auv_oa_command_t")
-    except Exception:
+    except Exception as exc:
         oa_cmd_t = None
+        print(f"WARNING: auv_oa_command_t not found ({exc}).\n"
+              f"         control_mode will be blank and the per-mode breakdown "
+              f"unavailable.\n"
+              f"         Mount the acfr-lcm clone (see /acfr-lcm in "
+              f"docker-compose.yaml) or pass --lcmtypes.", file=sys.stderr)
 
     V = args.vehicle
     # Latest-value cache; every channel but the trigger is sampled, not queued,
@@ -439,8 +458,8 @@ def main():
     r.add_argument("--label", default="", help="name for the report table")
     r.add_argument("--contact-topic", default="/seeker/contacts")
     r.add_argument("--no-contacts", action="store_true")
-    r.add_argument("--lcmtypes",
-                   default="/root/git/acfr-lcm/build/lib/python3.8/dist-packages/perls/lcmtypes")
+    r.add_argument("--lcmtypes", default="",
+                   help="extra root to search for generated LCM types")
     r.set_defaults(func=cmd_record)
 
     p = sub.add_parser("report", help="score one or more recordings")

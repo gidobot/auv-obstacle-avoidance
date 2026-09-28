@@ -352,6 +352,117 @@ class Run:
         }
 
 
+def cmd_watch(args):
+    """Live mission-progress monitor.
+
+    Exists because a whole class of SITL pathology is invisible in a summary and
+    obvious in one glance at progress over time.  A leg that never arrives, a
+    vehicle that turns around mid-leg, a planner that replans the vehicle back
+    to the start -- all of them show up immediately as distance-to-destination
+    failing to fall, and all of them were found here the slow way.
+
+    Reads three channels and needs no GUI, so it works over ssh:
+
+        PATH_COMMAND          the leg the planner is currently driving to
+        PATH_RESPONSE         the planner's own distance-to-destination
+        <vehicle>_GT.ACFR_NAV ground-truth position, altitude and heading
+    """
+    import importlib.util as ilu
+    import glob
+    import os
+    import time
+
+    import lcm
+
+    def load(pkg, name):
+        roots = [args.lcmtypes] if args.lcmtypes else []
+        roots += [r for r in LCMTYPE_ROOTS if r not in roots]
+        for root in roots:
+            for cand in glob.glob(os.path.join(root, pkg, name + ".py")):
+                spec = ilu.spec_from_file_location(name, cand)
+                mod = ilu.module_from_spec(spec)
+                sys.modules[name] = mod
+                spec.loader.exec_module(mod)
+                return getattr(mod, name)
+        return getattr(__import__(pkg, fromlist=[name]), name)
+
+    nav_t = load("acfrlcm", "auv_acfr_nav_t")
+    pcmd_t = load("acfrlcm", "auv_path_command_t")
+    presp_t = load("acfrlcm", "auv_path_response_t")
+
+    V = args.vehicle
+    st = {"goal": None, "tgt": None, "dist": float("nan"), "dist_t": 0.0,
+          "nav": None, "leg_t0": None, "worst": None, "stuck_since": None,
+          "best": float("inf")}
+
+    def on_cmd(ch, data):
+        m = pcmd_t.decode(data)
+        tgt = (m.waypoint[0], m.waypoint[1], m.waypoint[2])
+        if st["goal"] != m.goal_id or st["tgt"] != tgt:
+            st.update(goal=m.goal_id, tgt=tgt, leg_t0=time.time(),
+                      best=float("inf"), stuck_since=None)
+            mode = "ALT" if m.depth_mode == pcmd_t.ALTITUDE else "DEPTH"
+            print(f"\n--- new leg: goal {m.goal_id}  target "
+                  f"N {tgt[0]:.1f}  E {tgt[1]:.1f}  {tgt[2]:.1f} {mode} ---",
+                  flush=True)
+
+    def on_resp(ch, data):
+        m = presp_t.decode(data)
+        st["dist"], st["dist_t"] = m.distance, time.time()
+        # "best" is the closest approach so far; distance above it means the
+        # vehicle is being driven away from the goal, which is the signature of
+        # a replan anchored behind it.
+        if m.distance < st["best"]:
+            st["best"] = m.distance
+            st["stuck_since"] = None
+        elif m.distance > st["best"] + args.regress and st["stuck_since"] is None:
+            st["stuck_since"] = time.time()
+
+    def on_nav(ch, data):
+        st["nav"] = nav_t.decode(data)
+
+    lc = lcm.LCM()
+    lc.subscribe(f"{V}.PATH_COMMAND", on_cmd)
+    lc.subscribe(f"{V}.PATH_RESPONSE", on_resp)
+    lc.subscribe(f"{V}_GT.ACFR_NAV", on_nav)
+    lc.subscribe(f"{V}.ACFR_NAV", on_nav)      # fallback if GT is not published
+
+    print(f"watching {V}   (ctrl-C to stop)")
+    print(f"{'t':>6} {'goal':>5} {'north':>8} {'east':>8} {'depth':>7} "
+          f"{'alt':>6} {'hdg':>6} {'toGo':>7} {'best':>7}  state")
+    t0 = time.time()
+    last = 0.0
+    try:
+        while True:
+            lc.handle_timeout(200)
+            now = time.time()
+            if now - last < args.interval:
+                continue
+            last = now
+            n = st["nav"]
+            if n is None:
+                print("  waiting for nav ...", flush=True); continue
+            alt = n.altitude if n.altitude == n.altitude and n.altitude > 0 else float("nan")
+            # state flags, cheapest first
+            flags = []
+            if now - st["dist_t"] > 1.0:
+                flags.append("NO PATH_RESPONSE")
+            if st["stuck_since"] is not None:
+                flags.append(f"MOVING AWAY {now-st['stuck_since']:.0f}s "
+                             f"(+{st['dist']-st['best']:.1f} m)")
+            if st["leg_t0"] and now - st["leg_t0"] > args.leg_warn:
+                flags.append(f"leg {now-st['leg_t0']:.0f}s")
+            band = "" if alt != alt else ("IN BAND" if abs(alt-args.altitude) <= args.band else "")
+            state = "  ".join(flags) or band or "ok"
+            print(f"{now-t0:6.0f} {str(st['goal']):>5} {n.x:8.2f} {n.y:8.2f} "
+                  f"{n.depth:7.2f} {alt:6.2f} {math.degrees(n.heading)%360:6.1f} "
+                  f"{st['dist']:7.2f} {st['best'] if st['best']<9e9 else float('nan'):7.2f}  "
+                  f"{state}", flush=True)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    return 0
+
+
 def cmd_report(args):
     runs = [Run(p, args.band, args.altitude) for p in args.runs]
     rows = [r.summary() for r in runs]
@@ -467,6 +578,19 @@ def main():
     p.add_argument("--json", help="also write the summary as JSON")
     common(p)
     p.set_defaults(func=cmd_report)
+
+    w = sub.add_parser("watch", help="live mission progress (no GUI, ssh friendly)")
+    w.add_argument("--vehicle", default="SEEKER-SITL")
+    w.add_argument("--interval", type=float, default=2.0,
+                   help="seconds between lines")
+    w.add_argument("--regress", type=float, default=1.0,
+                   help="metres past the closest approach before warning")
+    w.add_argument("--leg-warn", type=float, default=300.0,
+                   help="warn once a leg has run this long (s)")
+    w.add_argument("--lcmtypes", default="",
+                   help="extra root to search for generated LCM types")
+    common(w)
+    w.set_defaults(func=cmd_watch)
 
     q = sub.add_parser("plot", help="3-D trajectory + altitude figure")
     q.add_argument("run")

@@ -9,6 +9,3 @@ __pycache__/
 venv/
 .venv/
 
-# SITL recordings (sitl_eval.py record)
-runs/
-*.npz

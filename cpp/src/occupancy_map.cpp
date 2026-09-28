@@ -37,6 +37,19 @@ Eigen::MatrixXd DVLConfig::beam_directions_3d() const {
     return dirs;
 }
 
+std::vector<double> DVLConfig::beam_projection_scale() const {
+    std::vector<double> scale;
+    scale.reserve(beams.size());
+    for (auto& [slant_deg, h_off_deg] : beams) {
+        double s = slant_deg  * M_PI / 180.0;
+        double h = h_off_deg  * M_PI / 180.0;
+        double fwd  = std::sin(s) * std::cos(h);
+        double down = std::cos(s);
+        scale.push_back(std::sqrt(fwd * fwd + down * down));
+    }
+    return scale;
+}
+
 std::vector<bool> DVLConfig::beam_can_clear() const {
     std::vector<bool> result;
     result.reserve(beams.size());
@@ -221,7 +234,8 @@ void OccupancyMap::update_dvl_ray(
     const std::optional<std::vector<bool>>& hit_surface,
     double range_step,
     double vehicle_heading,
-    const std::optional<std::vector<bool>>& can_clear)
+    const std::optional<std::vector<bool>>& can_clear,
+    const std::optional<std::vector<double>>& proj_scale)
 {
     if (beam_angles.size() != ranges.size())
         throw std::invalid_argument("update_dvl_ray: beam_angles and ranges must be the same length");
@@ -229,12 +243,23 @@ void OccupancyMap::update_dvl_ray(
         throw std::invalid_argument("update_dvl_ray: hit_surface must be the same length as ranges");
     if (can_clear.has_value() && can_clear->size() != ranges.size())
         throw std::invalid_argument("update_dvl_ray: can_clear must be the same length as ranges");
+    if (proj_scale.has_value() && proj_scale->size() != ranges.size())
+        throw std::invalid_argument("update_dvl_ray: proj_scale must be the same length as ranges");
 
     const auto& c = cfg_;
     int n = static_cast<int>(ranges.size());
 
     for (int i = 0; i < n; ++i) {
-        double r_max     = ranges[i];
+        // Into the plane, not along the beam.  beam_angles[i] is the direction
+        // of the beam's projection into X-Z; the slant range is its length in
+        // 3-D, which is longer than the projection whenever the beam has a
+        // lateral component.  Using the slant range with the projected angle
+        // puts the return both too far along track and too deep, by 1/scale.
+        // On a flat seabed at 12 m altitude that wrote the aft beams in 0.5 m
+        // deeper than the forward one, so the map sloped where the seabed did
+        // not.
+        double scale     = proj_scale.has_value() ? (*proj_scale)[i] : 1.0;
+        double r_max     = ranges[i] * scale;
         if (!std::isfinite(r_max)) continue;
         double ang       = beam_angles[i];
         bool   is_hit    = !hit_surface.has_value() || (*hit_surface)[i];
@@ -277,7 +302,13 @@ void OccupancyMap::update_dvl_ray(
         double min_vert = std::numeric_limits<double>::infinity();
         for (int i = 0; i < n; ++i) {
             if ((*hit_surface)[i]) {
-                double vert = ranges[i] * std::cos(beam_angles[i]);
+                // scale * cos(projected angle) == cos(slant), so this is the
+                // true vertical drop of the beam.  Without the scale it read
+                // cos of the projected angle alone, which for an aft beam is
+                // nearer vertical than the beam really is and so overstated
+                // the altitude by 4.7 percent.
+                double scale = proj_scale.has_value() ? (*proj_scale)[i] : 1.0;
+                double vert = ranges[i] * scale * std::cos(beam_angles[i]);
                 if (vert < min_vert) min_vert = vert;
             }
         }
@@ -1087,10 +1118,12 @@ void ObstacleMapper::update_sensor(SensorType /*type*/, const DVLMeasurement& me
     double fwd_x  = vehicle_forward_x();
     auto angles    = dvl_config_.beam_angles_rad();
     auto can_clear = dvl_config_.beam_can_clear();
+    auto proj      = dvl_config_.beam_projection_scale();
     omap_.update_dvl_ray(meas.ranges, angles, pose.depth, fwd_x,
                          std::optional<std::vector<bool>>(meas.hit_surface),
                          0.15, pose.heading,
-                         std::optional<std::vector<bool>>(can_clear));
+                         std::optional<std::vector<bool>>(can_clear),
+                         std::optional<std::vector<double>>(proj));
     omap_.update(pose.depth, pose.heading);
 }
 

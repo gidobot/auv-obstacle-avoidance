@@ -44,6 +44,18 @@ static std::optional<std::vector<bool>> obj_to_opt_bool(py::object obj) {
     return result;
 }
 
+static std::optional<std::vector<double>> obj_to_opt_double(py::object obj) {
+    if (obj.is_none()) return std::nullopt;
+    auto arr = py::array_t<double>::ensure(obj);
+    if (!arr) {
+        throw py::type_error("proj_scale must be a numpy double array or None");
+    }
+    auto r = arr.unchecked<1>();
+    std::vector<double> result(static_cast<size_t>(r.shape(0)));
+    for (py::ssize_t i = 0; i < r.shape(0); ++i) result[static_cast<size_t>(i)] = r[i];
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // Module definition
 // ---------------------------------------------------------------------------
@@ -114,6 +126,10 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
         .def_property_readonly("beam_can_clear",
             [](const DVLConfig& self) {
                 return vec_bool_to_numpy(self.beam_can_clear());
+            })
+        .def_property_readonly("beam_projection_scale",
+            [](const DVLConfig& self) {
+                return vec_double_to_numpy(self.beam_projection_scale());
             })
     ;
 
@@ -244,7 +260,8 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
                py::object hit_surface_obj,
                double range_step,
                double vehicle_heading,
-               py::object can_clear_obj)
+               py::object can_clear_obj,
+               py::object proj_scale_obj)
             {
                 auto r = ranges_arr.unchecked<1>();
                 auto a = beam_angles_arr.unchecked<1>();
@@ -257,8 +274,10 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
 
                 auto hit_opt   = obj_to_opt_bool(hit_surface_obj);
                 auto clear_opt = obj_to_opt_bool(can_clear_obj);
+                auto proj_opt  = obj_to_opt_double(proj_scale_obj);
                 self.update_dvl_ray(ranges, angles, vehicle_depth, vehicle_world_x,
-                                    hit_opt, range_step, vehicle_heading, clear_opt);
+                                    hit_opt, range_step, vehicle_heading, clear_opt,
+                                    proj_opt);
             },
             py::arg("ranges"),
             py::arg("beam_angles"),
@@ -267,7 +286,8 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
             py::arg("hit_surface") = py::none(),
             py::arg("range_step") = 0.15,
             py::arg("vehicle_heading") = kNaN,
-            py::arg("can_clear") = py::none())
+            py::arg("can_clear") = py::none(),
+            py::arg("proj_scale") = py::none())
 
         .def("update_altimeter_ray", &OccupancyMap::update_altimeter_ray,
              py::arg("range_m"), py::arg("vehicle_depth"), py::arg("vehicle_world_x"),

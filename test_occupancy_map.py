@@ -40,16 +40,25 @@ def make_mapper():
 def cast_dvl(dvl, vehicle_x, vehicle_z, terrain_fn, step=0.1):
     """Ray-march each beam against a height field; returns (ranges, hits).
 
+    Casts along the 3-D beam direction and returns the 3-D slant range, which
+    is what a DVL reports.  It used to march the 2-D projected direction and
+    return the in-plane distance, which is a shorter number: for a 20 deg beam
+    at a 120 deg heading offset the two differ by 4.7 percent.  The mapper was
+    mis-projecting by exactly that factor in the opposite direction, so the two
+    errors cancelled and this harness agreed with a mapper that was wrong.  The
+    terrain is constant across track, so only the forward component moves the
+    sample point.
+
     Note this caster only resolves terrain *below* the vehicle — it reports the
     first point where the ray passes under the surface.  See test_cliff_run.
     """
-    angles = dvl.beam_angles_rad
-    ranges = np.zeros(len(angles))
-    hits   = np.zeros(len(angles), dtype=bool)
-    for i, ang in enumerate(angles):
+    dirs   = np.asarray(dvl.beam_directions_3d)   # (fwd, stbd, down) per beam
+    ranges = np.zeros(len(dirs))
+    hits   = np.zeros(len(dirs), dtype=bool)
+    for i, (fwd, _stbd, down) in enumerate(dirs):
         r = step
         while r < dvl.max_range:
-            if vehicle_z + math.cos(ang) * r >= terrain_fn(vehicle_x + math.sin(ang) * r):
+            if vehicle_z + down * r >= terrain_fn(vehicle_x + fwd * r):
                 ranges[i] = r
                 hits[i] = True
                 break

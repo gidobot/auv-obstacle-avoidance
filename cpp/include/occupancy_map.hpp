@@ -127,6 +127,19 @@ struct DVLConfig {
     /// Returns n_beams × 3 matrix.
     Eigen::MatrixXd beam_directions_3d() const;
 
+    /// Length of each unit beam vector after projection into the vehicle X-Z
+    /// plane, sqrt(sin^2(slant)*cos^2(heading_offset) + cos^2(slant)).
+    ///
+    /// beam_angles_rad() gives the *direction* of that projection but loses its
+    /// *length*: a beam with a lateral component covers less ground in the X-Z
+    /// plane than its slant range, because part of the range went sideways,
+    /// out of the plane the 2-D map lives in.  Multiply a slant range by this
+    /// to get the distance travelled within the plane.
+    ///
+    /// 1.0 for beams with no lateral component; 0.9551 for a 20 deg beam at a
+    /// 120 deg heading offset.
+    std::vector<double> beam_projection_scale() const;
+
     /// True for beams whose 3-D direction lies in the vehicle X-Z plane
     /// (no lateral/starboard displacement). Only these beams may clear voxels
     /// in the 2-D occupancy grid; sideways beams would incorrectly clear
@@ -306,6 +319,13 @@ public:
     ///     hit_surface: Boolean array, True if beam hit the seafloor.
     ///                  Shape (n_beams,).  If None, altitude is not updated.
     ///     range_step: Step size for ray marching (m).
+    ///     proj_scale: Per-beam projection scale, from
+    ///                 DVLConfig::beam_projection_scale().  Slant ranges are
+    ///                 multiplied by it to get the distance the beam covers
+    ///                 inside the X-Z plane.  Omitting it assumes every beam
+    ///                 already lies in that plane, which places lateral beams
+    ///                 too far out and too deep; pass it unless the beams
+    ///                 genuinely have no lateral component.
     void update_dvl_ray(
         const std::vector<double>& ranges,
         const std::vector<double>& beam_angles,
@@ -314,7 +334,8 @@ public:
         const std::optional<std::vector<bool>>& hit_surface = std::nullopt,
         double range_step    = 0.15,
         double vehicle_heading = kNaN,
-        const std::optional<std::vector<bool>>& can_clear = std::nullopt);
+        const std::optional<std::vector<bool>>& can_clear = std::nullopt,
+        const std::optional<std::vector<double>>& proj_scale = std::nullopt);
 
     /// Update occupancy from a straight-down altimeter beam.
     ///

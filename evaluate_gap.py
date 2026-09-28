@@ -94,6 +94,7 @@ class OracleMapper:
         self._fan = _fan()
         self._dirs = np.asarray(self._fan.beam_directions_3d)
         self._angles = np.asarray(self._fan.beam_angles_rad)
+        self._proj = np.asarray(self._fan.beam_projection_scale)
         self._clear = np.ones(len(self._angles), dtype=bool)
 
     # -- pass-through surface ------------------------------------------------
@@ -129,7 +130,7 @@ class OracleMapper:
                 rng[i] = self._fan.max_range
         omap.update_dvl_ray(rng, self._angles, pose.depth, world_x,
                             hit_surface=hit, vehicle_heading=pose.heading,
-                            can_clear=self._clear)
+                            can_clear=self._clear, proj_scale=self._proj)
         omap.dvl_altitude = alt                      # undo the fan's corruption
         omap.update(pose.depth, pose.heading)        # replan on the filled map
 

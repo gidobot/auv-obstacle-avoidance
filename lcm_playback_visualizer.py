@@ -117,8 +117,15 @@ except ImportError as exc:                       # live mode still works
 # ---------------------------------------------------------------------------
 try:
     from visualizer import HTML_CLIENT_3D
-except ImportError:
-    HTML_CLIENT_3D = "<html><body>visualizer.py not found</body></html>"
+except ImportError as _exc:
+    # Report the real reason.  This used to claim the file was missing for any
+    # ImportError, including one raised *inside* visualizer.py, which sent the
+    # last person looking for a file that was sitting right there.
+    _msg = f"cannot import HTML_CLIENT_3D from visualizer.py: {_exc}"
+    print(f"WARNING: {_msg}", file=sys.stderr)
+    HTML_CLIENT_3D = (
+        "<html><body style='font:14px system-ui;padding:2rem'>"
+        f"<h3>Browser client unavailable</h3><pre>{_msg}</pre></body></html>")
 
 # ---------------------------------------------------------------------------
 # Interactive 3D terrain viewer (Plotly surface, served at /3d)

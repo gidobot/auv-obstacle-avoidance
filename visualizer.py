@@ -9,6 +9,11 @@ Usage:
     # Then open http://localhost:8080 in a browser
 """
 
+# PEP 604 annotations (str | None) appear below and need Python 3.10.
+# The acfr_sitl container runs 3.8, and the live oa-mapper viewer imports
+# this module for HTML_CLIENT_3D, so defer annotation evaluation.
+from __future__ import annotations
+
 import asyncio
 import json
 import threading
@@ -25,13 +30,29 @@ except ImportError:
     subprocess.check_call(['pip', 'install', 'websockets', '--break-system-packages'])
     import websockets
 
-from occupancy_map_cpp import OccupancyMap, OccupancyMapConfig
-from simulator import (
-    Simulator3D, Trajectory3D, StraightTrajectory3D, ArcTrajectory3D,
-    WaypointTrajectory3D, SegmentedTrajectory3D,
-    make_terrain_3d, _TERRAIN_3D_REGISTRY,
-    make_lawnmower_trajectory, _integrate_trajectory_path,
-)
+# The simulator and the pybind extension are needed to *run* a simulation.
+# They are not needed to serve the browser client: HTML_CLIENT_3D below is a
+# plain string.  Keeping the import optional lets the live oa-mapper viewer
+# import this module wherever LCM reaches -- notably inside the acfr_sitl
+# container, which builds the C++ core for the node but not the extension.
+try:
+    from occupancy_map_cpp import OccupancyMap, OccupancyMapConfig
+    from simulator import (
+        Simulator3D, Trajectory3D, StraightTrajectory3D, ArcTrajectory3D,
+        WaypointTrajectory3D, SegmentedTrajectory3D,
+        make_terrain_3d, _TERRAIN_3D_REGISTRY,
+        make_lawnmower_trajectory, _integrate_trajectory_path,
+    )
+    _HAVE_SIM = True
+    _SIM_IMPORT_ERROR = None
+except ImportError as _exc:               # client-only use still works
+    _HAVE_SIM = False
+    _SIM_IMPORT_ERROR = _exc
+    OccupancyMap = OccupancyMapConfig = None
+    Simulator3D = Trajectory3D = StraightTrajectory3D = ArcTrajectory3D = None
+    WaypointTrajectory3D = SegmentedTrajectory3D = None
+    make_terrain_3d = _TERRAIN_3D_REGISTRY = None
+    make_lawnmower_trajectory = _integrate_trajectory_path = None
 
 
 # Viridis colormap (12 stops, dark purple → bright yellow).  Mirrors the LUT
@@ -960,6 +981,12 @@ class VisualizerServer3D:
         return nx, ny, dx, dy, ox, oy
 
     def _create_sim(self):
+        if not _HAVE_SIM:
+            raise RuntimeError(
+                f"running a simulation needs the simulator and the "
+                f"occupancy_map_cpp extension ({_SIM_IMPORT_ERROR}). "
+                f"Build it with build.sh.  Serving the browser client alone "
+                f"does not require either.")
         config = OccupancyMapConfig()
         terrain_fn = make_terrain_3d(self.terrain_type, **self.terrain_kwargs)
         init_depth = self.initial_depth if hasattr(self, 'initial_depth') else 0.0

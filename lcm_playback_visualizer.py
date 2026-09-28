@@ -557,6 +557,42 @@ def sonar_hit_world(nav_x: float, nav_y: float, nav_depth: float,
             float(nav_depth)]
 
 
+def manifold_world_points(manifold_z, manifold_grid_origin_x: float,
+                          grid_origin_x: float, cx: int, dx: float,
+                          nav_x: float, nav_y: float, heading: float) -> list:
+    """The occupancy map's manifold as world ``[north, east, depth]`` points.
+
+    The manifold is the planner's own seafloor estimate: the shallowest
+    occupied depth in each along-track column, already at the grid's 0.5 m
+    resolution and already extending to the forward horizon.  That makes it a
+    much denser terrain source than the raw returns, and a more informative
+    one for this particular tool -- it is what the controller believes, which
+    is what actually determines its behaviour.  It shows the cliff before the
+    vehicle has flown over it.
+
+    Column i sits at ``manifold_grid_origin_x + i*dx`` on the same along-track
+    axis the vehicle's own coordinate lives on, so the offset from the vehicle
+    is just the difference, rotated into the world by the heading.  Held
+    separately from grid_origin_x because advance() shifts one and not the
+    other.
+
+    The projection assumes the manifold was built along the current heading,
+    which is true down a survey leg and smears through a turn.  Smearing puts
+    terrain slightly off to one side; combined with the shallowest-wins rule
+    in TerrainAccumulator that reads as a pessimistic seafloor rather than a
+    dangerous one, but it is why the raw returns are kept alongside.
+    """
+    veh_along = grid_origin_x + cx * dx
+    cos_h, sin_h = math.cos(heading), math.sin(heading)
+    pts = []
+    for i, z in enumerate(manifold_z):
+        if z is None or not math.isfinite(z):
+            continue
+        d = (manifold_grid_origin_x + i * dx) - veh_along
+        pts.append((nav_x + d * cos_h, nav_y + d * sin_h, float(z)))
+    return pts
+
+
 class TerrainAccumulator:
     """Sparse world-frame bathymetry raster built from sensor returns.
 
@@ -568,8 +604,19 @@ class TerrainAccumulator:
     Shared by log playback and live mode so both render the same seafloor.
     """
 
+    #: Target cell size (m).  The sensors sample far finer than this along
+    #: track -- at 0.5 m/s and 8 Hz the DVL lands a triple every 6 cm -- so
+    #: the raster, not the data, is what limits detail.  At the 2 m this used
+    #: to be, the sawtooth test terrain's 70 deg face (7.2 m horizontal) was
+    #: 3.6 cells wide and read as a smooth ramp.
+    CELL_M = 0.5
+
+    #: ...but the whole raster is re-serialised on every broadcast, so cap the
+    #: cell count and coarsen instead of blowing up the payload on a big area.
+    MAX_CELLS = 40000
+
     def __init__(self, ox: float, oy: float, nx: int, ny: int,
-                 dx: float = 2.0, dy: float = 2.0,
+                 dx: float = CELL_M, dy: float = CELL_M,
                  mission_path: Optional[list] = None):
         self.ox, self.oy = float(ox), float(oy)
         self.nx, self.ny = int(nx), int(ny)
@@ -579,21 +626,41 @@ class TerrainAccumulator:
         self.dirty = False
 
     @classmethod
-    def around(cls, points, margin: float = 30.0, dx: float = 2.0,
-               dy: float = 2.0, mission_path: Optional[list] = None,
+    def around(cls, points, margin: float = 15.0,
+               cell: Optional[float] = None,
+               mission_path: Optional[list] = None,
                fallback_half_extent: float = 120.0) -> 'TerrainAccumulator':
-        """Grid covering ``points`` (``[north, east]`` pairs) plus a margin."""
+        """Grid covering ``points`` (``[north, east]`` pairs) plus a margin.
+
+        The margin has to clear the widest the sensor footprint ever gets,
+        which is the DVL's 0.36*altitude at the highest altitude flown -- about
+        11 m on a descent from the surface over 30 m of water.  Much beyond
+        that and the raster is mostly empty: a two-leg mission 1.5 m wide would
+        sit in a 62 m-wide grid at the 30 m this used to be, and the 3-D view
+        framed 40x more empty seafloor than surveyed.
+        """
+        cell = cls.CELL_M if cell is None else cell
         pts = [p for p in points if p is not None]
         if pts:
             ns = [p[0] for p in pts]
             es = [p[1] for p in pts]
             ox, oy = min(ns) - margin, min(es) - margin
-            nx = max(4, int(np.ceil((max(ns) + margin - ox) / dx)))
-            ny = max(4, int(np.ceil((max(es) + margin - oy) / dy)))
+            span_n = max(ns) + margin - ox
+            span_e = max(es) + margin - oy
         else:
             ox = oy = -fallback_half_extent
-            nx = ny = max(4, int(np.ceil(2 * fallback_half_extent / dx)))
-        return cls(ox, oy, nx, ny, dx, dy, mission_path)
+            span_n = span_e = 2 * fallback_half_extent
+
+        # Coarsen if the area would blow past the cell budget.  Scaling both
+        # axes by the same factor keeps the cells square, so the top-down view
+        # stays undistorted.
+        n_at_cell = (span_n / cell) * (span_e / cell)
+        if n_at_cell > cls.MAX_CELLS:
+            cell *= math.sqrt(n_at_cell / cls.MAX_CELLS)
+
+        nx = max(4, int(np.ceil(span_n / cell)))
+        ny = max(4, int(np.ceil(span_e / cell)))
+        return cls(ox, oy, nx, ny, cell, cell, mission_path)
 
     def clear(self) -> None:
         self.height_map[:] = np.nan
@@ -783,6 +850,7 @@ class PlaybackServer:
         lcm_types_path: str = _DEFAULT_LCM_TYPES_PATH,
         sonar_max_range: Optional[float] = None,
         altimeter_max_range: Optional[float] = None,
+        manifold_terrain: bool = True,
     ):
         self.events = events
         self.vehicle_name = vehicle_name
@@ -849,6 +917,8 @@ class PlaybackServer:
         self._alt_t = None
         self._btk_t = None
         self._isa_t = None
+
+        self._manifold_terrain = manifold_terrain
 
         # Sparse 3D height map — filled as sensors fire, broadcast periodically
         self._terrain = self._init_height_map()
@@ -1052,6 +1122,13 @@ class PlaybackServer:
 
         manifold_z = [None if np.isnan(z) else float(z)
                       for z in snap['manifold_z']]
+
+        if self._manifold_terrain and self._initialized:
+            for pt in manifold_world_points(
+                    manifold_z, snap['manifold_grid_origin_x'],
+                    snap['grid_origin_x'], snap['cx'], snap['dx'],
+                    self._nav_x, self._nav_y, self._nav_heading):
+                self._terrain.record(*pt)
 
         # Flat terrain profile at estimated seafloor depth
         alt = self.mapper.get_altitude()
@@ -1277,6 +1354,7 @@ class LiveServer:
         mission: Optional[str] = None,
         sonar_max_range: Optional[float] = None,
         altimeter_max_range: Optional[float] = None,
+        manifold_terrain: bool = True,
     ):
         self.vehicle_name = vehicle_name
         self.http_port = http_port
@@ -1306,6 +1384,7 @@ class LiveServer:
         self._have_nav = False
         self._dvl_hit_xy: list = []
         self._sonar_hit_xy: Optional[list] = None
+        self._manifold_terrain = manifold_terrain
 
         # Bathymetry raster.  Sized around the mission when there is one; a
         # 50 m survey on a fixed 1 km plane is a dot in the middle.  Without a
@@ -1402,6 +1481,15 @@ class LiveServer:
         altitude = (self._last_cmd.altitude
                     if (self._last_cmd is not None and self._last_cmd.altitude >= 0)
                     else (None if g.dvl_altitude < 0 else float(g.dvl_altitude)))
+
+        # Feed the planner's manifold into the bathymetry.  Uses the pose
+        # carried in this message rather than the latest nav fix, so the
+        # terrain lands where the grid that produced it actually was.
+        if self._manifold_terrain and self._terrain is not None:
+            for pt in manifold_world_points(
+                    g.manifold_z, g.manifold_grid_origin_x, g.grid_origin_x,
+                    cx, g.dx, g.vehicle_x, g.vehicle_y, g.vehicle_heading):
+                self._terrain.record(*pt)
 
         horizon_back = cx * g.dx
         horizon_fwd = (nx - 1 - cx) * g.dx
@@ -1583,6 +1671,13 @@ def main() -> None:
                         help="Sonar max range (m) used to classify no-returns. Set this to "
                              "the vehicle's oa-mapper sonar_max_range so playback matches "
                              "what the vehicle did (cheryl.cfg: 20, seeker-sitl.cfg: 100)")
+    parser.add_argument('--no-manifold-terrain', action='store_true',
+                        help="Build the bathymetry only from raw sensor returns. "
+                             "By default the occupancy map's manifold is drawn in "
+                             "too, which is denser and reaches the forward horizon "
+                             "but is the planner's inference rather than a "
+                             "measurement -- turn it off to see just what was "
+                             "actually observed.")
     parser.add_argument('--altimeter-max-range', type=float, metavar='M',
                         help="Altimeter max range (m) used to classify no-returns. Set this "
                              "to the vehicle's oa-mapper altimeter_max_range (cheryl.cfg and "
@@ -1608,6 +1703,7 @@ def main() -> None:
             mission=args.mission,
             sonar_max_range=args.sonar_max_range,
             altimeter_max_range=args.altimeter_max_range,
+            manifold_terrain=not args.no_manifold_terrain,
         )
         asyncio.run(live.start())
         return
@@ -1649,6 +1745,7 @@ def main() -> None:
         lcm_types_path=args.lcm_types_path,
         sonar_max_range=args.sonar_max_range,
         altimeter_max_range=args.altimeter_max_range,
+        manifold_terrain=not args.no_manifold_terrain,
     )
 
     asyncio.run(server.start())

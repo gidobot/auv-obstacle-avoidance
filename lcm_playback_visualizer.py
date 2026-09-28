@@ -25,6 +25,7 @@ If the vehicle uses a different convention (e.g. x = east), swap with --swap-xy.
 import asyncio
 import http.server
 import json
+import math
 import os
 import sys
 import threading
@@ -157,6 +158,9 @@ _HTML_3D = r"""<!DOCTYPE html>
 const WS_URL = 'ws://localhost:%%WS_PORT%%';
 let terrainMap = null, plotReady = false;
 let trail = [];
+// Latest sensor returns, in world NED.  Each entry is [north, east, depth]
+// (or null for a beam with no return); the plot's z axis is -depth.
+let dvlHits = [], sonarHit = null;
 
 // ---------------------------------------------------------------------------
 // Interaction guard — all Plotly updates are deferred while the user has a
@@ -197,6 +201,8 @@ function connect() {
     } else if (msg.vehicle_wx !== undefined && plotReady) {
       trail.push([msg.vehicle_wx, msg.vehicle_y, -msg.vehicle_z]);
       if (trail.length > 400) trail.shift();
+      dvlHits  = msg.dvl_hit_xy || [];
+      sonarHit = msg.sonar_hit_xy || null;
       if (interacting) { pendingVehicleUpdate = true; }
       else             { applyVehicleRestyle(); }
     }
@@ -266,6 +272,63 @@ function vehicleTrace() {
   };
 }
 
+// --- Sensor returns -------------------------------------------------------
+// The rays show where the seafloor estimate is actually coming from, which is
+// the whole point of watching this live: a surface that stops growing because
+// every beam has dropped out looks identical to one the vehicle has simply
+// not reached yet.
+//
+// Rays are drawn as a single trace with nulls separating the segments —
+// Plotly breaks the line at a null, so three beams cost one trace, not three.
+
+// A hit is [north, east, depth].  Two-element hits (no depth) cannot be
+// placed in 3-D at all, so they are dropped rather than plotted at NaN.
+function hasDepth(h) { return h && h.length > 2 && h[2] != null; }
+
+function rayCoords(hits) {
+  const p = trail.length ? trail[trail.length-1] : null;
+  const x = [], y = [], z = [];
+  if (!p) return { x, y, z };
+  for (const h of hits) {
+    if (!hasDepth(h)) continue;
+    x.push(p[0], h[0], null);
+    y.push(p[1], h[1], null);
+    z.push(p[2], -h[2], null);
+  }
+  return { x, y, z };
+}
+function hitCoords(hits) {
+  const valid = hits.filter(hasDepth);
+  return { x: valid.map(h => h[0]), y: valid.map(h => h[1]),
+           z: valid.map(h => -h[2]) };
+}
+function dvlRayTrace() {
+  const c = rayCoords(dvlHits);
+  return { type: 'scatter3d', mode: 'lines', x: c.x, y: c.y, z: c.z,
+           line: { color: 'rgba(120,230,110,0.55)', width: 2 },
+           hoverinfo: 'skip', showlegend: false, name: 'DVL beams' };
+}
+function dvlHitTrace() {
+  const c = hitCoords(dvlHits);
+  return { type: 'scatter3d', mode: 'markers', x: c.x, y: c.y, z: c.z,
+           marker: { color: 'rgba(150,255,130,0.95)', size: 4 },
+           hovertemplate: 'DVL  N %{x:.1f}  E %{y:.1f}<extra></extra>',
+           showlegend: false, name: 'DVL returns' };
+}
+function sonarRayTrace() {
+  const c = rayCoords(sonarHit ? [sonarHit] : []);
+  return { type: 'scatter3d', mode: 'lines', x: c.x, y: c.y, z: c.z,
+           line: { color: 'rgba(80,160,255,0.6)', width: 2 },
+           hoverinfo: 'skip', showlegend: false, name: 'Sonar beam' };
+}
+function sonarHitTrace() {
+  const c = hitCoords(sonarHit ? [sonarHit] : []);
+  return { type: 'scatter3d', mode: 'markers', x: c.x, y: c.y, z: c.z,
+           marker: { color: 'rgba(120,190,255,0.95)', size: 5 },
+           hovertemplate: 'Sonar  N %{x:.1f}  E %{y:.1f}<extra></extra>',
+           showlegend: false, name: 'Sonar return' };
+}
+
 // ---------------------------------------------------------------------------
 // Layout (used only once at init — never re-applied so camera is preserved)
 // ---------------------------------------------------------------------------
@@ -310,7 +373,8 @@ function makeLayout(tm) {
 function initPlot() {
   document.getElementById('loading').style.display = 'none';
   Plotly.newPlot('plot',
-    [surfaceTrace(terrainMap), trailTrace(), vehicleTrace()],
+    [surfaceTrace(terrainMap), trailTrace(), vehicleTrace(),
+     dvlRayTrace(), dvlHitTrace(), sonarRayTrace(), sonarHitTrace()],
     makeLayout(terrainMap),
     { responsive: true, displaylogo: false,
       modeBarButtonsToRemove: ['resetCameraLastSave3d'] });
@@ -331,6 +395,15 @@ function applyVehicleRestyle() {
   }, [1]);
   const p = trail[trail.length-1];
   Plotly.restyle('plot', { x: [[p[0]]], y: [[p[1]]], z: [[p[2]]] }, [2]);
+
+  const dRay = rayCoords(dvlHits),  dHit = hitCoords(dvlHits);
+  const sRay = rayCoords(sonarHit ? [sonarHit] : []);
+  const sHit = hitCoords(sonarHit ? [sonarHit] : []);
+  Plotly.restyle('plot', {
+    x: [dRay.x, dHit.x, sRay.x, sHit.x],
+    y: [dRay.y, dHit.y, sRay.y, sHit.y],
+    z: [dRay.z, dHit.z, sRay.z, sHit.z],
+  }, [3, 4, 5, 6]);
 }
 
 function updateHud() {
@@ -401,43 +474,167 @@ def load_events(log_path: str, vehicle_name: str) -> List[tuple]:
 
 
 # ---------------------------------------------------------------------------
-# DVL beam hit positions in world XY (for top-down map overlay)
+# Sensor geometry — world-frame beam hits and the bathymetry they accumulate
+#
+# Both the log-playback path and the live path need these, and live mode has
+# to run without the compiled extension (the acfr_sitl container builds the
+# C++ core for the oa-mapper node but not the Python bindings).  So the beam
+# geometry is reproduced here in plain numpy rather than read off DVLConfig.
 # ---------------------------------------------------------------------------
 
-def _dvl_hit_xy(nav_x: float, nav_y: float, heading_rad: float,
-                ranges: np.ndarray, dvl_cfg: DVLConfig,
-                hit_surface: np.ndarray) -> list:
-    """Return list of [wx, wy] or None for each reported DVL beam's surface hit."""
-    hits = []
-    dirs = dvl_cfg.beam_directions_3d  # shape (n_cfg, 3): [fwd, stbd, down]
-    n = min(len(ranges), len(dirs))    # guard against nbeams < configured beams
+#: (slant_angle_deg, heading_offset_deg) per beam, mirroring the defaults in
+#: oa_mapper::DVLConfig::beams.  oa-mapper exposes no bot_param key for these
+#: and the LCM messages do not carry them, so there is nothing to read the
+#: real geometry from -- a vehicle with a different head needs this changed.
+_DVL_BEAMS = [(20.0, 0.0), (20.0, 120.0), (20.0, 240.0)]
+
+#: Fallbacks for sensor limits that live mode cannot read from the gridmap
+#: message.  They match the C++ library defaults, not any particular vehicle;
+#: pass --sonar-max-range / --altimeter-max-range to match a real config.
+_SONAR_MAX_RANGE_DEFAULT = 12.0
+_ALT_MAX_RANGE_DEFAULT   = 100.0
+_VEHICLE_LENGTH_DEFAULT  = 2.0
+_SONAR_MIN_DEPTH_DEFAULT = 1.0
+
+
+def dvl_beam_directions(beams=_DVL_BEAMS) -> np.ndarray:
+    """Unit beam vectors in the vehicle frame, columns (forward, starboard, down).
+
+    Same construction as ``DVLConfig::beam_directions_3d`` in the C++ library.
+    """
+    dirs = np.empty((len(beams), 3))
+    for i, (slant_deg, h_off_deg) in enumerate(beams):
+        s = math.radians(slant_deg)
+        h = math.radians(h_off_deg)
+        dirs[i] = (math.sin(s) * math.cos(h),   # forward
+                   math.sin(s) * math.sin(h),   # starboard
+                   math.cos(s))                 # down
+    return dirs
+
+
+def dvl_hits_world(nav_x: float, nav_y: float, nav_depth: float,
+                   heading_rad: float, ranges: np.ndarray,
+                   dirs: np.ndarray, hit_surface: np.ndarray) -> list:
+    """Per-beam seafloor return as ``[north, east, depth]``, or None if no return.
+
+    Depth is carried alongside the horizontal position because the same points
+    feed three consumers: the top-down overlay (which reads the first two
+    elements), the 3-D view, and the bathymetry accumulator.  Computing the
+    geometry once keeps them from drifting apart.
+    """
+    dirs = np.asarray(dirs)
+    n = min(len(ranges), len(dirs))   # guard against nbeams < configured beams
     cos_h = np.cos(heading_rad)
     sin_h = np.sin(heading_rad)
+    hits = []
     for i in range(n):
         if not hit_surface[i] or ranges[i] <= 0:
             hits.append(None)
             continue
-        fwd, stbd = dirs[i, 0], dirs[i, 1]
         r = ranges[i]
-        dx_fwd = r * fwd
-        dx_stbd = r * stbd
-        wx = nav_x + dx_fwd * cos_h - dx_stbd * sin_h
-        wy = nav_y + dx_fwd * sin_h + dx_stbd * cos_h
-        hits.append([float(wx), float(wy)])
+        fwd, stbd, down = dirs[i, 0], dirs[i, 1], dirs[i, 2]
+        dx_fwd, dx_stbd = r * fwd, r * stbd
+        hits.append([
+            float(nav_x + dx_fwd * cos_h - dx_stbd * sin_h),
+            float(nav_y + dx_fwd * sin_h + dx_stbd * cos_h),
+            float(nav_depth + r * down),
+        ])
     return hits
 
 
-def _sonar_hit_xy(nav_x: float, nav_y: float, heading_rad: float,
-                  range_m: float, vehicle_length: float,
-                  hit: bool) -> Optional[list]:
-    """Return [wx, wy] of the forward sonar return, or None."""
+def sonar_hit_world(nav_x: float, nav_y: float, nav_depth: float,
+                    heading_rad: float, range_m: float,
+                    vehicle_length: float, hit: bool) -> Optional[list]:
+    """Forward-sonar return as ``[north, east, depth]``, or None.
+
+    The beam looks horizontally forward, so the return sits at vehicle depth.
+    """
     if not hit or range_m <= 0:
         return None
-    nose_offset = vehicle_length / 2.0
-    total = nose_offset + range_m
-    cos_h = np.cos(heading_rad)
-    sin_h = np.sin(heading_rad)
-    return [float(nav_x + total * cos_h), float(nav_y + total * sin_h)]
+    total = vehicle_length / 2.0 + range_m
+    return [float(nav_x + total * np.cos(heading_rad)),
+            float(nav_y + total * np.sin(heading_rad)),
+            float(nav_depth)]
+
+
+class TerrainAccumulator:
+    """Sparse world-frame bathymetry raster built from sensor returns.
+
+    Each cell keeps the *shallowest* depth ever observed in it.  That is the
+    surface the survey has to clear: a beam grazing a cliff face reports
+    something deeper than the ridge line above it, and averaging the two would
+    quietly bury the ridge.
+
+    Shared by log playback and live mode so both render the same seafloor.
+    """
+
+    def __init__(self, ox: float, oy: float, nx: int, ny: int,
+                 dx: float = 2.0, dy: float = 2.0,
+                 mission_path: Optional[list] = None):
+        self.ox, self.oy = float(ox), float(oy)
+        self.nx, self.ny = int(nx), int(ny)
+        self.dx, self.dy = float(dx), float(dy)
+        self.mission_path = mission_path or []
+        self.height_map = np.full((self.ny, self.nx), np.nan)
+        self.dirty = False
+
+    @classmethod
+    def around(cls, points, margin: float = 30.0, dx: float = 2.0,
+               dy: float = 2.0, mission_path: Optional[list] = None,
+               fallback_half_extent: float = 120.0) -> 'TerrainAccumulator':
+        """Grid covering ``points`` (``[north, east]`` pairs) plus a margin."""
+        pts = [p for p in points if p is not None]
+        if pts:
+            ns = [p[0] for p in pts]
+            es = [p[1] for p in pts]
+            ox, oy = min(ns) - margin, min(es) - margin
+            nx = max(4, int(np.ceil((max(ns) + margin - ox) / dx)))
+            ny = max(4, int(np.ceil((max(es) + margin - oy) / dy)))
+        else:
+            ox = oy = -fallback_half_extent
+            nx = ny = max(4, int(np.ceil(2 * fallback_half_extent / dx)))
+        return cls(ox, oy, nx, ny, dx, dy, mission_path)
+
+    def clear(self) -> None:
+        self.height_map[:] = np.nan
+        self.dirty = False
+
+    def record(self, world_x: float, world_y: float, depth: float) -> None:
+        """Record one terrain observation, keeping the shallowest per cell."""
+        if not np.isfinite(depth) or depth < 0.0:
+            return
+        ix = int(np.floor((world_x - self.ox) / self.dx))
+        iy = int(np.floor((world_y - self.oy) / self.dy))
+        if 0 <= ix < self.nx and 0 <= iy < self.ny:
+            existing = self.height_map[iy, ix]
+            if np.isnan(existing) or depth < existing:
+                self.height_map[iy, ix] = depth
+                self.dirty = True
+
+    def build_msg(self) -> str:
+        """Serialise the raster for the browser.
+
+        Unexplored cells are encoded as JSON null so the client can render them
+        in a distinct colour without dragging the depth scale around.
+        """
+        valid = self.height_map[~np.isnan(self.height_map)]
+        if len(valid) >= 2:
+            min_z, max_z = float(np.min(valid)), float(np.max(valid))
+            if max_z - min_z < 1.0:
+                max_z = min_z + 1.0        # prevent a degenerate colour range
+        else:
+            min_z, max_z = 5.0, 25.0       # defaults before enough data arrives
+
+        return json.dumps({
+            'type': 'terrain_map',
+            'nx': self.nx, 'ny': self.ny,
+            'dx': self.dx, 'dy': self.dy,
+            'ox': self.ox, 'oy': self.oy,
+            'minZ': min_z, 'maxZ': max_z,
+            'data': [None if np.isnan(v) else float(v)
+                     for v in self.height_map.flatten()],
+            'mission_path': self.mission_path,
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -654,8 +851,8 @@ class PlaybackServer:
         self._isa_t = None
 
         # Sparse 3D height map — filled as sensors fire, broadcast periodically
-        self._init_height_map()
-        self._terrain_map_msg: str = self._build_terrain_map_msg()
+        self._terrain = self._init_height_map()
+        self._terrain_map_msg: str = self._terrain.build_msg()
         self._hmap_last_sent: float = 0.0
 
     def _load_decoders(self) -> None:
@@ -667,80 +864,20 @@ class PlaybackServer:
         self._btk_t = nucleus_bottomtrack_t
         self._isa_t = isa500_t
 
-    def _init_height_map(self) -> None:
-        """Scan nav events to determine map bounds, then initialise an empty height map."""
+    def _init_height_map(self) -> 'TerrainAccumulator':
+        """Scan nav events for the track bounds, then size an empty height map."""
         _ensure_lcm_path(self.lcm_types_path)
         from acfrlcm import auv_acfr_nav_t
 
-        xs, ys = [], []
+        track = []
         for _utime, suffix, raw in self.events:
             if suffix == 'ACFR_NAV':
                 try:
                     msg = auv_acfr_nav_t.decode(raw)
-                    north, east = (msg.y, msg.x) if self.swap_xy else (msg.x, msg.y)
-                    xs.append(north); ys.append(east)
+                    track.append((msg.y, msg.x) if self.swap_xy else (msg.x, msg.y))
                 except Exception:
                     pass
-
-        margin = 30.0
-        dx = dy = 2.0
-        if xs:
-            ox = min(xs) - margin
-            oy = min(ys) - margin
-            nx = max(4, int(np.ceil((max(xs) + margin - ox) / dx)))
-            ny = max(4, int(np.ceil((max(ys) + margin - oy) / dy)))
-        else:
-            ox, oy, nx, ny = -120.0, -120.0, 120, 120
-
-        self._hmap_ox: float = ox
-        self._hmap_oy: float = oy
-        self._hmap_nx: int = nx
-        self._hmap_ny: int = ny
-        self._hmap_dx: float = dx
-        self._hmap_dy: float = dy
-        self._height_map: np.ndarray = np.full((ny, nx), np.nan)
-        self._hmap_dirty: bool = False
-
-    def _build_terrain_map_msg(self) -> str:
-        """Serialise the current sparse height map for the browser.
-
-        Unexplored cells are encoded as JSON null so the browser can render
-        them in a distinct 'unexplored' colour without affecting the depth
-        colour scale.
-        """
-        hmap = self._height_map
-        valid = hmap[~np.isnan(hmap)]
-        if len(valid) >= 2:
-            min_z = float(np.min(valid))
-            max_z = float(np.max(valid))
-            if max_z - min_z < 1.0:
-                max_z = min_z + 1.0   # prevent degenerate colour range
-        else:
-            min_z, max_z = 5.0, 25.0  # defaults before enough data arrives
-
-        data = [None if np.isnan(v) else float(v) for v in hmap.flatten()]
-        return json.dumps({
-            'type': 'terrain_map',
-            'nx': self._hmap_nx, 'ny': self._hmap_ny,
-            'dx': float(self._hmap_dx), 'dy': float(self._hmap_dy),
-            'ox': float(self._hmap_ox), 'oy': float(self._hmap_oy),
-            'minZ': min_z, 'maxZ': max_z,
-            'data': data,
-            'mission_path': [],
-        })
-
-    def _record_terrain_hit(self, world_x: float, world_y: float,
-                            depth: float) -> None:
-        """Record a terrain height observation; keep the shallowest (surface) depth."""
-        if not np.isfinite(depth) or depth < 0.0:
-            return
-        ix = int(np.floor((world_x - self._hmap_ox) / self._hmap_dx))
-        iy = int(np.floor((world_y - self._hmap_oy) / self._hmap_dy))
-        if 0 <= ix < self._hmap_nx and 0 <= iy < self._hmap_ny:
-            existing = self._height_map[iy, ix]
-            if np.isnan(existing) or depth < existing:
-                self._height_map[iy, ix] = depth
-                self._hmap_dirty = True
+        return TerrainAccumulator.around(track)
 
     # ------------------------------------------------------------------
     # Pose helpers
@@ -817,24 +954,13 @@ class PlaybackServer:
                 self._DVLMeasurement(ranges=ranges, hit_surface=valid),
                 pose,
             )
-            self._dvl_hit_xy = _dvl_hit_xy(
-                self._nav_x, self._nav_y, self._nav_heading,
-                ranges, self._dvl_cfg, valid,
+            self._dvl_hit_xy = dvl_hits_world(
+                self._nav_x, self._nav_y, self._nav_depth, self._nav_heading,
+                ranges, self._dvl_cfg.beam_directions_3d, valid,
             )
-            # Rasterise 3-D beam hit points into the height map
-            dirs = self._dvl_cfg.beam_directions_3d   # shape (n, 3): fwd, stbd, down
-            cos_h = np.cos(self._nav_heading)
-            sin_h = np.sin(self._nav_heading)
-            for i in range(min(len(ranges), len(dirs))):
-                if not valid[i] or ranges[i] <= 0:
-                    continue
-                r = ranges[i]
-                fwd, stbd, down = dirs[i, 0], dirs[i, 1], dirs[i, 2]
-                self._record_terrain_hit(
-                    self._nav_x + r * fwd * cos_h - r * stbd * sin_h,
-                    self._nav_y + r * fwd * sin_h + r * stbd * cos_h,
-                    self._nav_depth + r * down,
-                )
+            for hit in self._dvl_hit_xy:
+                if hit is not None:
+                    self._terrain.record(*hit)
 
         elif suffix == 'NUCLEUS.ALTIMETER' and self._initialized:
             msg = self._alt_t.decode(raw)
@@ -857,8 +983,8 @@ class PlaybackServer:
             )
             # Rasterise altimeter hit — straight-down return at vehicle position
             if hit:
-                self._record_terrain_hit(self._nav_x, self._nav_y,
-                                         self._nav_depth + dist)
+                self._terrain.record(self._nav_x, self._nav_y,
+                                     self._nav_depth + dist)
 
         elif suffix == 'ISA500_FWD' and self._initialized:
             msg = self._isa_t.decode(raw)
@@ -877,20 +1003,14 @@ class PlaybackServer:
                     range_m=min(dist, max_r) if dist_ok else max_r, hit=hit),
                 pose,
             )
-            self._sonar_hit_xy = _sonar_hit_xy(
-                self._nav_x, self._nav_y, self._nav_heading,
+            self._sonar_hit_xy = sonar_hit_world(
+                self._nav_x, self._nav_y, self._nav_depth, self._nav_heading,
                 dist, self.mapper.omap.cfg.vehicle_length, hit,
             )
             # Rasterise sonar hit — skip shallow returns (surface reflections)
-            if hit and self._nav_depth >= self.mapper.omap.cfg.sonar_min_depth_m:
-                vl = self.mapper.omap.cfg.vehicle_length
-                cos_h = np.cos(self._nav_heading)
-                sin_h = np.sin(self._nav_heading)
-                self._record_terrain_hit(
-                    self._nav_x + (vl / 2.0 + dist) * cos_h,
-                    self._nav_y + (vl / 2.0 + dist) * sin_h,
-                    self._nav_depth,
-                )
+            if (self._sonar_hit_xy is not None
+                    and self._nav_depth >= self.mapper.omap.cfg.sonar_min_depth_m):
+                self._terrain.record(*self._sonar_hit_xy)
 
     def _current_log_utime(self) -> int:
         """Return the log-time (μs) we should have processed up to right now."""
@@ -1000,9 +1120,9 @@ class PlaybackServer:
 
             # Broadcast updated height map every 2 s while data is flowing
             now = time.monotonic()
-            if self._hmap_dirty and (now - self._hmap_last_sent >= 2.0) and self.clients:
-                self._terrain_map_msg = self._build_terrain_map_msg()
-                self._hmap_dirty = False
+            if self._terrain.dirty and (now - self._hmap_last_sent >= 2.0) and self.clients:
+                self._terrain_map_msg = self._terrain.build_msg()
+                self._terrain.dirty = False
                 self._hmap_last_sent = now
                 dead = set()
                 for client in list(self.clients):
@@ -1059,9 +1179,8 @@ class PlaybackServer:
                     self._xy_trail = []
                     self._dvl_hit_xy = []
                     self._sonar_hit_xy = None
-                    self._height_map[:] = np.nan
-                    self._hmap_dirty = False
-                    self._terrain_map_msg = self._build_terrain_map_msg()
+                    self._terrain.clear()
+                    self._terrain_map_msg = self._terrain.build_msg()
                     self.mapper = ObstacleMapper(
                         OccupancyMapConfig(), self._dvl_cfg,
                         SonarConfig(), AltimeterConfig()
@@ -1141,6 +1260,12 @@ class LiveServer:
     deployed ``oa-mapper`` process and serves the same browser visualizer used
     for log playback.  Works identically against a live vehicle, a live
     simulator, or an ``lcm-logplayer`` replay — it is all just LCM.
+
+    The gridmap message carries the planner's own view — the occupancy grid,
+    the manifold, the commanded-depth profile — but not the sensor returns
+    behind it, so the beam footprints and the world-frame bathymetry are
+    rebuilt here from the same raw channels oa-mapper consumes.  That is pure
+    geometry, so it runs without the compiled extension.
     """
 
     def __init__(
@@ -1150,6 +1275,8 @@ class LiveServer:
         ws_port: int = 8083,
         lcm_types_path: str = _DEFAULT_LCM_TYPES_PATH,
         mission: Optional[str] = None,
+        sonar_max_range: Optional[float] = None,
+        altimeter_max_range: Optional[float] = None,
     ):
         self.vehicle_name = vehicle_name
         self.http_port = http_port
@@ -1162,34 +1289,106 @@ class LiveServer:
         self._last_cmd = None          # most recent auv_oa_command_t
         self._lc = None                # lcm.LCM handle
 
-        # Flat top-down backdrop so the map view shows the vehicle + trail.
-        # (The occupancy grid itself renders in the profile view from state.)
-        #
-        # Sized around the mission rather than left at a fixed 1 km plane: a
-        # 50 m survey on a 1 km backdrop is a dot in the middle.  Square, and
-        # centred on the mission, so the aspect is not distorted by a lawnmower
-        # that is tens of metres long and a couple wide.
-        mission_path = parse_mission(mission) if mission else []
-        if mission_path:
-            ns = [p[0] for p in mission_path]
-            es = [p[1] for p in mission_path]
-            cn, ce = (min(ns)+max(ns))/2.0, (min(es)+max(es))/2.0
-            span = max(max(ns)-min(ns), max(es)-min(es))
-            span = max(span * 1.35, 20.0)          # margin, and a floor
-            ox, oy, extent = cn - span/2.0, ce - span/2.0, span
-            print(f"mission: {len(mission_path)} waypoints from {mission}")
+        # Sensor limits.  Live mode has no OccupancyMapConfig to read, and the
+        # gridmap message does not carry them, so these have to be told to us
+        # or fall back to the library defaults.  They only affect which returns
+        # count as hits, exactly as in playback.
+        self._sonar_max_range = (sonar_max_range if sonar_max_range is not None
+                                 else _SONAR_MAX_RANGE_DEFAULT)
+        self._alt_max_range   = (altimeter_max_range if altimeter_max_range is not None
+                                 else _ALT_MAX_RANGE_DEFAULT)
+        self._vehicle_length  = _VEHICLE_LENGTH_DEFAULT
+        self._sonar_min_depth = _SONAR_MIN_DEPTH_DEFAULT
+
+        # Raw-sensor state, tracked from ACFR_NAV and rendered per sensor tick.
+        self._dvl_dirs = dvl_beam_directions()
+        self._nav_x = self._nav_y = self._nav_depth = self._nav_heading = 0.0
+        self._have_nav = False
+        self._dvl_hit_xy: list = []
+        self._sonar_hit_xy: Optional[list] = None
+
+        # Bathymetry raster.  Sized around the mission when there is one; a
+        # 50 m survey on a fixed 1 km plane is a dot in the middle.  Without a
+        # mission the grid is deferred to the first nav fix so it lands on the
+        # vehicle instead of on the origin.
+        self._mission_path = parse_mission(mission) if mission else []
+        if self._mission_path:
+            print(f"mission: {len(self._mission_path)} waypoints from {mission}")
+            self._terrain = TerrainAccumulator.around(
+                self._mission_path, mission_path=self._mission_path)
         else:
-            ox, oy, extent = -500.0, -500.0, 1000.0
-        self._terrain_map_msg = json.dumps({
-            'type': 'terrain_map', 'nx': 2, 'ny': 2,
-            'dx': extent/2.0, 'dy': extent/2.0,
-            'ox': ox, 'oy': oy, 'minZ': 0.0, 'maxZ': 1.0,
-            'data': [0.5, 0.5, 0.5, 0.5], 'mission_path': mission_path,
-        })
+            self._terrain = None
 
     # ------------------------------------------------------------------
     # LCM decode → browser state
     # ------------------------------------------------------------------
+
+    def _on_nav(self, channel, data):
+        msg = self._nav_t.decode(data)
+        self._nav_x, self._nav_y = msg.x, msg.y     # NED: x north, y east
+        self._nav_depth, self._nav_heading = msg.depth, msg.heading
+        self._have_nav = True
+
+        if self._terrain is None:
+            # No mission to size the raster from — centre it on the first fix.
+            self._terrain = TerrainAccumulator.around([(self._nav_x, self._nav_y)],
+                                                      margin=120.0)
+            self._terrain.dirty = True
+
+        # Trail comes from nav, not from the gridmap: the gridmap is decimated
+        # to ~1 Hz for bandwidth, which would draw the track as a dotted line.
+        self._xy_trail.append([float(self._nav_x), float(self._nav_y)])
+        if len(self._xy_trail) > 2000:
+            self._xy_trail = self._xy_trail[-2000:]
+
+    def _on_bottomtrack(self, channel, data):
+        if not self._have_nav:
+            return
+        msg = self._btk_t.decode(data)
+        # distance_beam is a fixed 3-element array; nbeams is unreliable
+        # (often 0) in this ACFR driver configuration.  Gating must match
+        # oa_mapper.cpp: distance_beam_valid plus the 0.0 sentinel describe
+        # validity fully, and the sensor has already applied its range limit.
+        n = min(len(msg.distance_beam), len(self._dvl_dirs))
+        ranges = np.array(msg.distance_beam[:n], dtype=float)
+        valid = np.array(msg.distance_beam_valid[:n], dtype=bool)
+        usable = np.isfinite(ranges) & (ranges > 0.0)
+        valid &= usable
+        ranges = np.where(usable, ranges, 0.0)
+
+        self._dvl_hit_xy = dvl_hits_world(
+            self._nav_x, self._nav_y, self._nav_depth, self._nav_heading,
+            ranges, self._dvl_dirs, valid,
+        )
+        for hit in self._dvl_hit_xy:
+            if hit is not None:
+                self._terrain.record(*hit)
+
+    def _on_altimeter(self, channel, data):
+        if not self._have_nav:
+            return
+        dist = self._alt_t.decode(data).altimeter_distance
+        dist_ok = np.isfinite(dist) and dist > 0.0
+        if dist_ok and dist < self._alt_max_range - 0.05:
+            self._terrain.record(self._nav_x, self._nav_y,
+                                 self._nav_depth + dist)
+
+    def _on_sonar(self, channel, data):
+        if not self._have_nav:
+            return
+        dist = self._isa_t.decode(data).distance
+        # isa500_t carries only `distance` — no validity flag and no sentinel —
+        # so max range is genuinely the only way to infer a no-return.
+        dist_ok = np.isfinite(dist) and dist > 0.0
+        hit = dist_ok and dist < self._sonar_max_range - 0.1
+        self._sonar_hit_xy = sonar_hit_world(
+            self._nav_x, self._nav_y, self._nav_depth, self._nav_heading,
+            dist, self._vehicle_length, hit,
+        )
+        # Skip shallow returns: those are surface reflections, not seafloor.
+        if (self._sonar_hit_xy is not None
+                and self._nav_depth >= self._sonar_min_depth):
+            self._terrain.record(*self._sonar_hit_xy)
 
     def _on_gridmap(self, channel, data):
         g = self._gridmap_t.decode(data)
@@ -1203,10 +1402,6 @@ class LiveServer:
         altitude = (self._last_cmd.altitude
                     if (self._last_cmd is not None and self._last_cmd.altitude >= 0)
                     else (None if g.dvl_altitude < 0 else float(g.dvl_altitude)))
-
-        self._xy_trail.append([float(g.vehicle_x), float(g.vehicle_y)])
-        if len(self._xy_trail) > 500:
-            self._xy_trail = self._xy_trail[-500:]
 
         horizon_back = cx * g.dx
         horizon_fwd = (nx - 1 - cx) * g.dx
@@ -1238,7 +1433,8 @@ class LiveServer:
                 [float(vehicle_x + horizon_fwd), seafloor_z],
             ],
             'xy_trail': self._xy_trail[-500:],
-            'dvl_hit_xy': None, 'sonar_hit_xy': None,
+            'dvl_hit_xy': self._dvl_hit_xy,
+            'sonar_hit_xy': self._sonar_hit_xy,
             'enable_dvl': True, 'enable_altimeter': True, 'enable_sonar': True,
         }
         self._latest_state = json.dumps(state)
@@ -1251,12 +1447,28 @@ class LiveServer:
     # ------------------------------------------------------------------
 
     async def _broadcast_loop(self):
+        last_terrain_sent = 0.0
         while True:
-            if self.clients and self._latest_state is not None:
+            now = time.monotonic()
+            # Re-serialising the whole raster is not free, so it goes out on a
+            # slow cadence; the seafloor does not move, only our knowledge of
+            # it, and that grows a few cells per second.
+            terrain_msg = None
+            if (self.clients and self._terrain is not None
+                    and self._terrain.dirty
+                    and now - last_terrain_sent >= 2.0):
+                terrain_msg = self._terrain.build_msg()
+                self._terrain.dirty = False
+                last_terrain_sent = now
+
+            if self.clients and (terrain_msg or self._latest_state is not None):
                 dead = set()
                 for client in list(self.clients):
                     try:
-                        await client.send(self._latest_state)
+                        if terrain_msg is not None:
+                            await client.send(terrain_msg)
+                        if self._latest_state is not None:
+                            await client.send(self._latest_state)
                     except websockets.exceptions.ConnectionClosed:
                         dead.add(client)
                 self.clients -= dead
@@ -1265,7 +1477,8 @@ class LiveServer:
     async def _ws_handler(self, websocket):
         self.clients.add(websocket)
         try:
-            await websocket.send(self._terrain_map_msg)
+            if self._terrain is not None:
+                await websocket.send(self._terrain.build_msg())
             if self._latest_state is not None:
                 await websocket.send(self._latest_state)
             async for _message in websocket:
@@ -1280,13 +1493,24 @@ class LiveServer:
     async def start(self):
         import lcm
         _ensure_lcm_path(self.lcm_types_path)
-        from acfrlcm import auv_oa_gridmap_t, auv_oa_command_t
+        from acfrlcm import auv_oa_gridmap_t, auv_oa_command_t, auv_acfr_nav_t
+        from senlcm import nucleus_altimeter_t, nucleus_bottomtrack_t, isa500_t
         self._gridmap_t = auv_oa_gridmap_t
         self._command_t = auv_oa_command_t
+        self._nav_t = auv_acfr_nav_t
+        self._alt_t = nucleus_altimeter_t
+        self._btk_t = nucleus_bottomtrack_t
+        self._isa_t = isa500_t
 
+        v = self.vehicle_name
         self._lc = lcm.LCM()
-        self._lc.subscribe(f"{self.vehicle_name}.OA_GRIDMAP", self._on_gridmap)
-        self._lc.subscribe(f"{self.vehicle_name}.OA_COMMAND", self._on_command)
+        self._lc.subscribe(f"{v}.OA_GRIDMAP", self._on_gridmap)
+        self._lc.subscribe(f"{v}.OA_COMMAND", self._on_command)
+        # Same raw channels oa-mapper consumes — see the class docstring.
+        self._lc.subscribe(f"{v}.ACFR_NAV", self._on_nav)
+        self._lc.subscribe(f"{v}.NUCLEUS.BOTTOMTRACK", self._on_bottomtrack)
+        self._lc.subscribe(f"{v}.NUCLEUS.ALTIMETER", self._on_altimeter)
+        self._lc.subscribe(f"{v}.ISA500_FWD", self._on_sonar)
         threading.Thread(target=self._lcm_thread, daemon=True).start()
 
         client_html = _build_client_html(self.ws_port).encode()
@@ -1311,7 +1535,9 @@ class LiveServer:
         ).start()
 
         print(f"Live oa-mapper viewer for vehicle {self.vehicle_name}")
-        print(f"  subscribing: {self.vehicle_name}.OA_GRIDMAP / .OA_COMMAND")
+        print(f"  subscribing: {self.vehicle_name}"
+              ".{OA_GRIDMAP, OA_COMMAND, ACFR_NAV, NUCLEUS.BOTTOMTRACK, "
+              "NUCLEUS.ALTIMETER, ISA500_FWD}")
         print(f"  HTTP:       http://localhost:{self.http_port}")
         print(f"  WebSocket:  ws://localhost:{self.ws_port}")
         print("Open the URL above; the occupancy grid renders in the profile view.")
@@ -1380,6 +1606,8 @@ def main() -> None:
             ws_port=args.ws_port,
             lcm_types_path=args.lcm_types_path,
             mission=args.mission,
+            sonar_max_range=args.sonar_max_range,
+            altimeter_max_range=args.altimeter_max_range,
         )
         asyncio.run(live.start())
         return

@@ -42,6 +42,35 @@ _DEFAULT_LCM_TYPES_PATH = (
 )
 
 
+def parse_mission(path: str):
+    """Planned waypoints from an acfr-lcm mission XML, as [[north, east], ...].
+
+    Mission positions are NED, so x is north and y is east -- the same order
+    the browser client's top-down map expects (it plots vehicle_wx against
+    vehicle_y, which LiveServer fills from the gridmap's north and east).
+
+    Only the altitude-mode primitives are returned.  The depth-mode ones are
+    the launch and descent, all sitting at the same point, so drawing them
+    would put a meaningless spur on the planned track.
+    """
+    import xml.etree.ElementTree as ET
+    survey, every = [], []
+    for prim in ET.parse(path).getroot().findall("primitive"):
+        g = prim.find("goto")
+        if g is None:
+            continue
+        pos, dep = g.find("position"), g.find("depth")
+        if pos is None:
+            continue
+        pt = [float(pos.get("x", "nan")), float(pos.get("y", "nan"))]
+        if pt[0] != pt[0] or pt[1] != pt[1]:
+            continue
+        every.append(pt)
+        if dep is not None and (dep.get("mode") or "") == "altitude":
+            survey.append(pt)
+    return survey if len(survey) > 1 else every
+
+
 def _ensure_lcm_path(path: str) -> None:
     if path not in sys.path:
         sys.path.insert(0, path)
@@ -61,12 +90,27 @@ def _safe(v) -> Optional[float]:
         return None
 
 
-from occupancy_map_cpp import (
-    ObstacleMapper, OccupancyMapConfig,
-    DVLConfig, SonarConfig, AltimeterConfig,
-    Pose, SensorType,
-    DVLMeasurement, AltimeterMeasurement, SonarMeasurement,
-)
+# Log playback runs the mapper over recorded sensor data and so needs the
+# pybind extension.  Live mode does not: it renders the OA_GRIDMAP the
+# deployed oa-mapper node already publishes.  Importing lazily lets --live run
+# anywhere LCM reaches -- notably inside the acfr_sitl container, which builds
+# the C++ core for the node but not the Python extension.
+try:
+    from occupancy_map_cpp import (
+        ObstacleMapper, OccupancyMapConfig,
+        DVLConfig, SonarConfig, AltimeterConfig,
+        Pose, SensorType,
+        DVLMeasurement, AltimeterMeasurement, SonarMeasurement,
+    )
+    _HAVE_MAPPER = True
+    _MAPPER_IMPORT_ERROR = None
+except ImportError as exc:                       # live mode still works
+    _HAVE_MAPPER = False
+    _MAPPER_IMPORT_ERROR = exc
+    ObstacleMapper = OccupancyMapConfig = None
+    DVLConfig = SonarConfig = AltimeterConfig = None
+    Pose = SensorType = None
+    DVLMeasurement = AltimeterMeasurement = SonarMeasurement = None
 
 # ---------------------------------------------------------------------------
 # Browser HTML client — reuse the 3D visualizer's client unchanged
@@ -1098,6 +1142,7 @@ class LiveServer:
         http_port: int = 8082,
         ws_port: int = 8083,
         lcm_types_path: str = _DEFAULT_LCM_TYPES_PATH,
+        mission: Optional[str] = None,
     ):
         self.vehicle_name = vehicle_name
         self.http_port = http_port
@@ -1112,10 +1157,27 @@ class LiveServer:
 
         # Flat top-down backdrop so the map view shows the vehicle + trail.
         # (The occupancy grid itself renders in the profile view from state.)
+        #
+        # Sized around the mission rather than left at a fixed 1 km plane: a
+        # 50 m survey on a 1 km backdrop is a dot in the middle.  Square, and
+        # centred on the mission, so the aspect is not distorted by a lawnmower
+        # that is tens of metres long and a couple wide.
+        mission_path = parse_mission(mission) if mission else []
+        if mission_path:
+            ns = [p[0] for p in mission_path]
+            es = [p[1] for p in mission_path]
+            cn, ce = (min(ns)+max(ns))/2.0, (min(es)+max(es))/2.0
+            span = max(max(ns)-min(ns), max(es)-min(es))
+            span = max(span * 1.35, 20.0)          # margin, and a floor
+            ox, oy, extent = cn - span/2.0, ce - span/2.0, span
+            print(f"mission: {len(mission_path)} waypoints from {mission}")
+        else:
+            ox, oy, extent = -500.0, -500.0, 1000.0
         self._terrain_map_msg = json.dumps({
-            'type': 'terrain_map', 'nx': 2, 'ny': 2, 'dx': 1000.0, 'dy': 1000.0,
-            'ox': -500.0, 'oy': -500.0, 'minZ': 0.0, 'maxZ': 1.0,
-            'data': [0.5, 0.5, 0.5, 0.5], 'mission_path': [],
+            'type': 'terrain_map', 'nx': 2, 'ny': 2,
+            'dx': extent/2.0, 'dy': extent/2.0,
+            'ox': ox, 'oy': oy, 'minZ': 0.0, 'maxZ': 1.0,
+            'data': [0.5, 0.5, 0.5, 0.5], 'mission_path': mission_path,
         })
 
     # ------------------------------------------------------------------
@@ -1263,6 +1325,9 @@ def main() -> None:
     )
     parser.add_argument('log', metavar='LOG_FILE', nargs='?',
                         help='Path to the LCM log file (omit when using --live)')
+    parser.add_argument('--mission',
+                        help='mission XML to draw as the planned track in the '
+                             'top-down view (live mode)')
     parser.add_argument('--live', action='store_true',
                         help='Subscribe to the deployed oa-mapper OA_GRIDMAP channel '
                              'instead of replaying a log (requires --vehicle). Works '
@@ -1307,11 +1372,19 @@ def main() -> None:
             http_port=args.http_port,
             ws_port=args.ws_port,
             lcm_types_path=args.lcm_types_path,
+            mission=args.mission,
         )
         asyncio.run(live.start())
         return
 
     # --- Log-playback mode ---
+    if not _HAVE_MAPPER:
+        parser.error(
+            f"log playback needs the occupancy_map_cpp extension "
+            f"({_MAPPER_IMPORT_ERROR}).\n"
+            f"Build it with auv-obstacle-avoidance/build.sh, or use --live, "
+            f"which renders the OA_GRIDMAP published by the oa-mapper node and "
+            f"needs no extension.")
     if not args.log:
         parser.error("a LOG_FILE is required unless --live is given")
     if not os.path.isfile(args.log):

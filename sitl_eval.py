@@ -352,6 +352,37 @@ class Run:
         }
 
 
+# ── mission files ────────────────────────────────────────────────────────────
+
+def parse_mission(path):
+    """Waypoints from an acfr-lcm mission XML.
+
+    Returns a list of dicts with north/east/z/mode/heading.  Mission positions
+    are NED: x is north, y is east.  Primitives whose depth mode is "depth"
+    are the launch/descent preamble rather than survey line, and are marked so
+    the viewer can draw them differently.
+    """
+    import xml.etree.ElementTree as ET
+    out = []
+    for prim in ET.parse(path).getroot().findall("primitive"):
+        g = prim.find("goto")
+        if g is None:
+            continue
+        pos = g.find("position")
+        dep = g.find("depth")
+        hdg = g.find("heading")
+        if pos is None:
+            continue
+        out.append({
+            "north": float(pos.get("x", "nan")),
+            "east":  float(pos.get("y", "nan")),
+            "z":     float(pos.get("z", "nan")),
+            "mode":  (dep.get("mode") if dep is not None else "") or "",
+            "heading": float(hdg.get("deg", "nan")) if hdg is not None else float("nan"),
+        })
+    return out
+
+
 def cmd_watch(args):
     """Live mission-progress monitor.
 
@@ -458,6 +489,275 @@ def cmd_watch(args):
                   f"{n.depth:7.2f} {alt:6.2f} {math.degrees(n.heading)%360:6.1f} "
                   f"{st['dist']:7.2f} {st['best'] if st['best']<9e9 else float('nan'):7.2f}  "
                   f"{state}", flush=True)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    return 0
+
+
+# ── web viewer ───────────────────────────────────────────────────────────────
+
+VIEWER_HTML = """<!doctype html><meta charset="utf-8">
+<title>SITL mission monitor</title>
+<style>
+ :root{--bg:#0f1519;--pane:#16212a;--rule:#25333d;--ink:#dbe6ec;--muted:#8da1ac;
+       --ok:#4ec08a;--warn:#e2b23c;--bad:#e5556f;--plan:#5d7686;--leg:#49a0c9}
+ *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);
+   font:13px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
+ header{padding:.6rem .9rem;border-bottom:1px solid var(--rule);display:flex;
+   gap:1.2rem;align-items:baseline;flex-wrap:wrap}
+ h1{font-size:.95rem;margin:0;font-weight:600;letter-spacing:.02em}
+ .grid{display:grid;grid-template-columns:1fr 250px;gap:0;height:calc(100vh - 46px)}
+ canvas{width:100%;height:100%;display:block}
+ aside{border-left:1px solid var(--rule);padding:.8rem .9rem;overflow:auto;background:var(--pane)}
+ .row{display:flex;justify-content:space-between;gap:.6rem;padding:.2rem 0}
+ .k{color:var(--muted)} .v{font-variant-numeric:tabular-nums}
+ .flag{margin:.35rem 0;padding:.35rem .5rem;border-radius:3px;font-weight:600}
+ .f-bad{background:rgba(229,85,111,.16);color:var(--bad)}
+ .f-warn{background:rgba(226,178,60,.16);color:var(--warn)}
+ .f-ok{background:rgba(78,192,138,.14);color:var(--ok)}
+ h2{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);
+    margin:1rem 0 .3rem;font-weight:600}
+ .lgd{display:flex;align-items:center;gap:.4rem;padding:.12rem 0;color:var(--muted)}
+ .sw{width:14px;height:3px;border-radius:2px}
+</style>
+<header><h1>SITL mission monitor</h1>
+ <span class="k">vehicle <b class="v" id="veh">-</b></span>
+ <span class="k">leg <b class="v" id="goal">-</b></span>
+ <span class="k">elapsed <b class="v" id="el">-</b></span></header>
+<div class="grid"><canvas id="c"></canvas><aside>
+ <div class="row"><span class="k">north</span><span class="v" id="n">-</span></div>
+ <div class="row"><span class="k">east</span><span class="v" id="e">-</span></div>
+ <div class="row"><span class="k">depth</span><span class="v" id="d">-</span></div>
+ <div class="row"><span class="k">altitude</span><span class="v" id="a">-</span></div>
+ <div class="row"><span class="k">heading</span><span class="v" id="h">-</span></div>
+ <h2>progress</h2>
+ <div class="row"><span class="k">to go</span><span class="v" id="tg">-</span></div>
+ <div class="row"><span class="k">closest</span><span class="v" id="bs">-</span></div>
+ <div class="row"><span class="k">leg time</span><span class="v" id="lt">-</span></div>
+ <div class="row"><span class="k">in band</span><span class="v" id="ib">-</span></div>
+ <h2>state</h2><div id="flags"></div>
+ <h2>legend</h2>
+ <div class="lgd"><span class="sw" style="background:var(--plan)"></span>planned mission</div>
+ <div class="lgd"><span class="sw" style="background:var(--leg)"></span>current leg</div>
+ <div class="lgd"><span class="sw" style="background:var(--ok)"></span>track, in band</div>
+ <div class="lgd"><span class="sw" style="background:var(--bad)"></span>track, out of band</div>
+</aside></div>
+<script>
+const C=document.getElementById('c'),X=C.getContext('2d');
+let S=null;
+function fit(){const r=C.getBoundingClientRect(),dpr=devicePixelRatio||1;
+  C.width=r.width*dpr;C.height=r.height*dpr;X.setTransform(dpr,0,0,dpr,0,0);draw();}
+addEventListener('resize',fit);
+function bounds(){ // east -> screen x, north -> screen y (up)
+  let xs=[],ys=[];
+  (S.mission||[]).forEach(w=>{if(isFinite(w.east)){xs.push(w.east);ys.push(w.north)}});
+  (S.track||[]).forEach(p=>{xs.push(p[1]);ys.push(p[0])});
+  if(S.pos){xs.push(S.pos[1]);ys.push(S.pos[0])}
+  if(!xs.length){xs=[0,1];ys=[0,1]}
+  let x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+  const px=Math.max(3,(x1-x0)*0.1),py=Math.max(3,(y1-y0)*0.1);
+  return [x0-px,x1+px,y0-py,y1+py];
+}
+function draw(){
+  const r=C.getBoundingClientRect();X.clearRect(0,0,r.width,r.height);
+  if(!S){return}
+  const [x0,x1,y0,y1]=bounds();
+  const sc=Math.min(r.width/(x1-x0), r.height/(y1-y0));
+  const ox=(r.width-(x1-x0)*sc)/2, oy=(r.height-(y1-y0)*sc)/2;
+  const PX=e=>ox+(e-x0)*sc, PY=n=>r.height-oy-(n-y0)*sc;
+  // planned mission underlay
+  const M=S.mission||[];
+  const surv=M.filter(w=>w.mode==='altitude');
+  X.lineWidth=2;X.strokeStyle='#5d7686';X.setLineDash([6,5]);
+  X.beginPath();surv.forEach((w,i)=>i?X.lineTo(PX(w.east),PY(w.north)):X.moveTo(PX(w.east),PY(w.north)));
+  X.stroke();X.setLineDash([]);
+  X.fillStyle='#5d7686';
+  surv.forEach(w=>{X.beginPath();X.arc(PX(w.east),PY(w.north),3,0,7);X.fill()});
+  // current leg
+  if(S.target){X.strokeStyle='#49a0c9';X.lineWidth=2.5;X.beginPath();
+    X.moveTo(PX(S.pos[1]),PY(S.pos[0]));X.lineTo(PX(S.target[1]),PY(S.target[0]));X.stroke();
+    X.fillStyle='#49a0c9';X.beginPath();X.arc(PX(S.target[1]),PY(S.target[0]),5,0,7);X.fill();}
+  // track, coloured by band membership
+  const T=S.track||[];X.lineWidth=2;
+  for(let i=1;i<T.length;i++){
+    X.strokeStyle=T[i][2]?'#4ec08a':'#e5556f';
+    X.beginPath();X.moveTo(PX(T[i-1][1]),PY(T[i-1][0]));X.lineTo(PX(T[i][1]),PY(T[i][0]));X.stroke();}
+  // vehicle
+  if(S.pos){const px=PX(S.pos[1]),py=PY(S.pos[0]);
+    X.save();X.translate(px,py);X.rotate((S.heading||0)*Math.PI/180);
+    X.fillStyle='#dbe6ec';X.beginPath();X.moveTo(0,-8);X.lineTo(5,7);X.lineTo(0,4);X.lineTo(-5,7);
+    X.closePath();X.fill();X.restore();}
+  // scale bar
+  const want=(x1-x0)/5, mag=Math.pow(10,Math.floor(Math.log10(want)));
+  const step=[1,2,5,10].map(m=>m*mag).find(v=>v>=want)||mag*10;
+  X.strokeStyle='#8da1ac';X.lineWidth=1.5;X.beginPath();
+  X.moveTo(14,r.height-18);X.lineTo(14+step*sc,r.height-18);X.stroke();
+  X.fillStyle='#8da1ac';X.font='11px ui-monospace,monospace';
+  X.fillText(step+' m',14,r.height-24);
+}
+const set=(id,v)=>document.getElementById(id).textContent=v;
+async function tick(){
+  try{ S=await (await fetch('state')).json(); }catch(e){ return }
+  set('veh',S.vehicle); set('goal',S.goal===null?'-':S.goal);
+  set('el',S.elapsed.toFixed(0)+' s');
+  set('n',S.pos?S.pos[0].toFixed(2):'-'); set('e',S.pos?S.pos[1].toFixed(2):'-');
+  set('d',S.depth!=null?S.depth.toFixed(2)+' m':'-');
+  set('a',S.alt!=null&&isFinite(S.alt)?S.alt.toFixed(2)+' m':'-');
+  set('h',S.heading!=null?S.heading.toFixed(1)+'\u00b0':'-');
+  set('tg',isFinite(S.dist)?S.dist.toFixed(2)+' m':'-');
+  set('bs',isFinite(S.best)?S.best.toFixed(2)+' m':'-');
+  set('lt',S.leg_time!=null?S.leg_time.toFixed(0)+' s':'-');
+  set('ib',S.pct_band!=null?S.pct_band.toFixed(1)+'%':'-');
+  const F=document.getElementById('flags');F.innerHTML='';
+  (S.flags&&S.flags.length?S.flags:[['ok','ok']]).forEach(([lvl,txt])=>{
+    const d=document.createElement('div');
+    d.className='flag f-'+(lvl==='bad'?'bad':lvl==='warn'?'warn':'ok');
+    d.textContent=txt;F.appendChild(d);});
+  draw();
+}
+fit(); tick(); setInterval(tick,700);
+</script>"""
+
+
+def cmd_serve(args):
+    """Web viewer: planned mission underlay plus live vehicle progress.
+
+    Same signals as `watch`, drawn instead of printed, with the mission file as
+    a static underlay so it is obvious at a glance whether the vehicle is
+    actually working along the planned line.
+    """
+    import glob
+    import importlib.util as ilu
+    import json as _json
+    import os
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import lcm
+
+    def load(pkg, name):
+        roots = [args.lcmtypes] if args.lcmtypes else []
+        roots += [r for r in LCMTYPE_ROOTS if r not in roots]
+        for root in roots:
+            for cand in glob.glob(os.path.join(root, pkg, name + ".py")):
+                spec = ilu.spec_from_file_location(name, cand)
+                mod = ilu.module_from_spec(spec)
+                sys.modules[name] = mod
+                spec.loader.exec_module(mod)
+                return getattr(mod, name)
+        return getattr(__import__(pkg, fromlist=[name]), name)
+
+    nav_t = load("acfrlcm", "auv_acfr_nav_t")
+    pcmd_t = load("acfrlcm", "auv_path_command_t")
+    presp_t = load("acfrlcm", "auv_path_response_t")
+
+    mission = parse_mission(args.mission) if args.mission else []
+    if args.mission:
+        print(f"mission: {len(mission)} waypoints from {args.mission}")
+
+    V = args.vehicle
+    lock = threading.Lock()
+    st = {"goal": None, "target": None, "dist": float("nan"), "dist_t": 0.0,
+          "pos": None, "depth": None, "alt": None, "heading": None,
+          "leg_t0": None, "best": float("inf"), "stuck_since": None,
+          "track": [], "in_band": 0, "n": 0}
+    t0 = time.time()
+
+    def on_cmd(ch, data):
+        m = pcmd_t.decode(data)
+        tgt = [m.waypoint[0], m.waypoint[1]]
+        with lock:
+            if st["goal"] != m.goal_id or st["target"] != tgt:
+                st.update(goal=m.goal_id, target=tgt, leg_t0=time.time(),
+                          best=float("inf"), stuck_since=None)
+
+    def on_resp(ch, data):
+        m = presp_t.decode(data)
+        with lock:
+            st["dist"], st["dist_t"] = m.distance, time.time()
+            if m.distance < st["best"]:
+                st["best"] = m.distance
+                st["stuck_since"] = None
+            elif m.distance > st["best"] + args.regress and st["stuck_since"] is None:
+                st["stuck_since"] = time.time()
+
+    def on_nav(ch, data):
+        m = nav_t.decode(data)
+        alt = m.altitude if (m.altitude == m.altitude and m.altitude > 0) else None
+        inb = alt is not None and abs(alt - args.altitude) <= args.band
+        with lock:
+            st.update(pos=[m.x, m.y], depth=m.depth, alt=alt,
+                      heading=math.degrees(m.heading) % 360.0)
+            st["n"] += 1
+            st["in_band"] += 1 if inb else 0
+            tr = st["track"]
+            # decimate: only store a point once the vehicle has actually moved
+            if not tr or (abs(tr[-1][0]-m.x) + abs(tr[-1][1]-m.y)) > args.trail_step:
+                tr.append([m.x, m.y, 1 if inb else 0])
+                if len(tr) > args.trail_max:
+                    del tr[:len(tr)//4]
+
+    lc = lcm.LCM()
+    lc.subscribe(f"{V}.PATH_COMMAND", on_cmd)
+    lc.subscribe(f"{V}.PATH_RESPONSE", on_resp)
+    lc.subscribe(f"{V}_GT.ACFR_NAV", on_nav)
+    lc.subscribe(f"{V}.ACFR_NAV", on_nav)
+
+    def lcm_loop():
+        while True:
+            try:
+                lc.handle_timeout(200)
+            except OSError:
+                time.sleep(0.05)
+    threading.Thread(target=lcm_loop, daemon=True).start()
+
+    def snapshot():
+        now = time.time()
+        with lock:
+            flags = []
+            if now - st["dist_t"] > 1.0:
+                flags.append(["bad", "NO PATH_RESPONSE"])
+            if st["stuck_since"] is not None:
+                flags.append(["bad", f"MOVING AWAY {now-st['stuck_since']:.0f}s "
+                                     f"(+{st['dist']-st['best']:.1f} m)"])
+            if st["leg_t0"] and now - st["leg_t0"] > args.leg_warn:
+                flags.append(["warn", f"leg running {now-st['leg_t0']:.0f}s"])
+            if st["pos"] is None:
+                flags.append(["warn", "waiting for nav"])
+            return {
+                "vehicle": V, "mission": mission, "goal": st["goal"],
+                "target": st["target"], "pos": st["pos"], "depth": st["depth"],
+                "alt": st["alt"], "heading": st["heading"],
+                "dist": st["dist"], "best": st["best"] if st["best"] < 9e9 else None,
+                "leg_time": (now - st["leg_t0"]) if st["leg_t0"] else None,
+                "pct_band": (100.0*st["in_band"]/st["n"]) if st["n"] else None,
+                "track": st["track"], "elapsed": now - t0, "flags": flags,
+            }
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path.rstrip("/") in ("", "/index.html"):
+                body, ctype = VIEWER_HTML.encode(), "text/html; charset=utf-8"
+            elif self.path.rstrip("/").endswith("state"):
+                body, ctype = _json.dumps(snapshot()).encode(), "application/json"
+            else:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer((args.host, args.port), H)
+    print(f"viewer on http://localhost:{args.port}/   (ctrl-C to stop)")
+    try:
+        srv.serve_forever()
     except KeyboardInterrupt:
         print("\nstopped")
     return 0
@@ -591,6 +891,21 @@ def main():
                    help="extra root to search for generated LCM types")
     common(w)
     w.set_defaults(func=cmd_watch)
+
+    v = sub.add_parser("serve", help="web viewer: mission underlay + live progress")
+    v.add_argument("--mission", help="mission XML to draw as the underlay")
+    v.add_argument("--vehicle", default="SEEKER-SITL")
+    v.add_argument("--port", type=int, default=8095)
+    v.add_argument("--host", default="0.0.0.0")
+    v.add_argument("--regress", type=float, default=1.0,
+                   help="metres past the closest approach before warning")
+    v.add_argument("--leg-warn", type=float, default=300.0)
+    v.add_argument("--trail-step", type=float, default=0.25,
+                   help="minimum movement before a track point is kept (m)")
+    v.add_argument("--trail-max", type=int, default=20000)
+    v.add_argument("--lcmtypes", default="")
+    common(v)
+    v.set_defaults(func=cmd_serve)
 
     q = sub.add_parser("plot", help="3-D trajectory + altitude figure")
     q.add_argument("run")

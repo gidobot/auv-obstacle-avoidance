@@ -160,7 +160,7 @@ let terrainMap = null, plotReady = false;
 let trail = [];
 // Latest sensor returns, in world NED.  Each entry is [north, east, depth]
 // (or null for a beam with no return); the plot's z axis is -depth.
-let dvlHits = [], sonarHit = null;
+let dvlHits = [], sonarHit = null, altHit = null;
 
 // ---------------------------------------------------------------------------
 // Interaction guard — all Plotly updates are deferred while the user has a
@@ -203,6 +203,7 @@ function connect() {
       if (trail.length > 400) trail.shift();
       dvlHits  = msg.dvl_hit_xy || [];
       sonarHit = msg.sonar_hit_xy || null;
+      altHit   = msg.alt_hit_xy || null;
       if (interacting) { pendingVehicleUpdate = true; }
       else             { applyVehicleRestyle(); }
     }
@@ -328,6 +329,25 @@ function sonarHitTrace() {
            hovertemplate: 'Sonar  N %{x:.1f}  E %{y:.1f}<extra></extra>',
            showlegend: false, name: 'Sonar return' };
 }
+// The altimeter gets its own colour and a bigger marker because it is the only
+// beam that reads what is directly underneath.  When it and the DVL fan
+// disagree, the altimeter is the one over the ground the vehicle is about to
+// fly into, and that gap is the thing worth being able to see.
+function altRayTrace() {
+  const c = rayCoords(altHit ? [altHit] : []);
+  return { type: 'scatter3d', mode: 'lines', x: c.x, y: c.y, z: c.z,
+           line: { color: 'rgba(255,190,80,0.75)', width: 3 },
+           hoverinfo: 'skip', showlegend: false, name: 'Altimeter beam' };
+}
+function altHitTrace() {
+  const c = hitCoords(altHit ? [altHit] : []);
+  return { type: 'scatter3d', mode: 'markers', x: c.x, y: c.y, z: c.z,
+           marker: { color: 'rgba(255,200,90,1.0)', size: 6,
+                     line: { color: 'rgba(180,120,20,0.9)', width: 1 } },
+           hovertemplate: 'Altimeter  depth %{customdata:.2f} m<extra></extra>',
+           customdata: c.z.map(v => -v),
+           showlegend: false, name: 'Altimeter return' };
+}
 
 // ---------------------------------------------------------------------------
 // Layout (used only once at init — never re-applied so camera is preserved)
@@ -374,7 +394,8 @@ function initPlot() {
   document.getElementById('loading').style.display = 'none';
   Plotly.newPlot('plot',
     [surfaceTrace(terrainMap), trailTrace(), vehicleTrace(),
-     dvlRayTrace(), dvlHitTrace(), sonarRayTrace(), sonarHitTrace()],
+     dvlRayTrace(), dvlHitTrace(), sonarRayTrace(), sonarHitTrace(),
+     altRayTrace(), altHitTrace()],
     makeLayout(terrainMap),
     { responsive: true, displaylogo: false,
       modeBarButtonsToRemove: ['resetCameraLastSave3d'] });
@@ -399,11 +420,14 @@ function applyVehicleRestyle() {
   const dRay = rayCoords(dvlHits),  dHit = hitCoords(dvlHits);
   const sRay = rayCoords(sonarHit ? [sonarHit] : []);
   const sHit = hitCoords(sonarHit ? [sonarHit] : []);
+  const aRay = rayCoords(altHit ? [altHit] : []);
+  const aHit = hitCoords(altHit ? [altHit] : []);
   Plotly.restyle('plot', {
-    x: [dRay.x, dHit.x, sRay.x, sHit.x],
-    y: [dRay.y, dHit.y, sRay.y, sHit.y],
-    z: [dRay.z, dHit.z, sRay.z, sHit.z],
-  }, [3, 4, 5, 6]);
+    x: [dRay.x, dHit.x, sRay.x, sHit.x, aRay.x, aHit.x],
+    y: [dRay.y, dHit.y, sRay.y, sHit.y, aRay.y, aHit.y],
+    z: [dRay.z, dHit.z, sRay.z, sHit.z, aRay.z, aHit.z],
+  }, [3, 4, 5, 6, 7, 8]);
+  Plotly.restyle('plot', { customdata: [aHit.z.map(v => -v)] }, [8]);
 }
 
 function updateHud() {
@@ -540,6 +564,20 @@ def dvl_hits_world(nav_x: float, nav_y: float, nav_depth: float,
             float(nav_depth + r * down),
         ])
     return hits
+
+
+def altimeter_hit_world(nav_x: float, nav_y: float, nav_depth: float,
+                        range_m: float, hit: bool) -> Optional[list]:
+    """Altimeter return as ``[north, east, depth]``, or None.
+
+    The dedicated vertical beam, so the return sits directly under the vehicle.
+    It is the only sensor that sees what is straight below: the DVL fan at 20
+    degrees lands 0.36*altitude out to each side and straddles anything
+    narrower than that, which on a sawtooth is most of a tooth.
+    """
+    if not hit or range_m <= 0:
+        return None
+    return [float(nav_x), float(nav_y), float(nav_depth + range_m)]
 
 
 def sonar_hit_world(nav_x: float, nav_y: float, nav_depth: float,
@@ -910,6 +948,7 @@ class PlaybackServer:
         self._xy_trail: list = []
         self._dvl_hit_xy: list = []
         self._sonar_hit_xy: Optional[list] = None
+        self._alt_hit_xy: Optional[list] = None
         self._elapsed_s: float = 0.0
 
         # LCM decoders (loaded lazily after path is set)
@@ -1052,9 +1091,10 @@ class PlaybackServer:
                 pose,
             )
             # Rasterise altimeter hit — straight-down return at vehicle position
-            if hit:
-                self._terrain.record(self._nav_x, self._nav_y,
-                                     self._nav_depth + dist)
+            self._alt_hit_xy = altimeter_hit_world(
+                self._nav_x, self._nav_y, self._nav_depth, dist, hit)
+            if self._alt_hit_xy is not None:
+                self._terrain.record(*self._alt_hit_xy)
 
         elif suffix == 'ISA500_FWD' and self._initialized:
             msg = self._isa_t.decode(raw)
@@ -1175,6 +1215,7 @@ class PlaybackServer:
             'xy_trail': self._xy_trail[-500:],
             'dvl_hit_xy': self._dvl_hit_xy,
             'sonar_hit_xy': self._sonar_hit_xy,
+            'alt_hit_xy': self._alt_hit_xy,
             'enable_dvl': True,
             'enable_altimeter': True,
             'enable_sonar': True,
@@ -1256,6 +1297,7 @@ class PlaybackServer:
                     self._xy_trail = []
                     self._dvl_hit_xy = []
                     self._sonar_hit_xy = None
+                    self._alt_hit_xy = None
                     self._terrain.clear()
                     self._terrain_map_msg = self._terrain.build_msg()
                     self.mapper = ObstacleMapper(
@@ -1384,6 +1426,7 @@ class LiveServer:
         self._have_nav = False
         self._dvl_hit_xy: list = []
         self._sonar_hit_xy: Optional[list] = None
+        self._alt_hit_xy: Optional[list] = None
         self._manifold_terrain = manifold_terrain
 
         # Bathymetry raster.  Sized around the mission when there is one; a
@@ -1448,9 +1491,11 @@ class LiveServer:
             return
         dist = self._alt_t.decode(data).altimeter_distance
         dist_ok = np.isfinite(dist) and dist > 0.0
-        if dist_ok and dist < self._alt_max_range - 0.05:
-            self._terrain.record(self._nav_x, self._nav_y,
-                                 self._nav_depth + dist)
+        hit = dist_ok and dist < self._alt_max_range - 0.05
+        self._alt_hit_xy = altimeter_hit_world(
+            self._nav_x, self._nav_y, self._nav_depth, dist, hit)
+        if self._alt_hit_xy is not None:
+            self._terrain.record(*self._alt_hit_xy)
 
     def _on_sonar(self, channel, data):
         if not self._have_nav:
@@ -1523,6 +1568,7 @@ class LiveServer:
             'xy_trail': self._xy_trail[-500:],
             'dvl_hit_xy': self._dvl_hit_xy,
             'sonar_hit_xy': self._sonar_hit_xy,
+            'alt_hit_xy': self._alt_hit_xy,
             'enable_dvl': True, 'enable_altimeter': True, 'enable_sonar': True,
         }
         self._latest_state = json.dumps(state)

@@ -93,9 +93,8 @@ class OracleMapper:
         self.terrain = terrain_fn
         self._fan = _fan()
         self._dirs = np.asarray(self._fan.beam_directions_3d)
-        self._angles = np.asarray(self._fan.beam_angles_rad)
-        self._proj = np.asarray(self._fan.beam_projection_scale)
-        self._clear = np.ones(len(self._angles), dtype=bool)
+        self._xz = np.asarray(self._fan.beam_xz)
+        self._clear = np.ones(len(self._xz), dtype=bool)
 
     # -- pass-through surface ------------------------------------------------
     @property
@@ -115,7 +114,7 @@ class OracleMapper:
         world_x = omap.grid_to_world_x(omap.cx)
         ch, sh = math.cos(pose.heading), math.sin(pose.heading)
 
-        n = len(self._angles)
+        n = len(self._xz)
         rng = np.zeros(n); hit = np.zeros(n, dtype=bool)
         for i, (fwd, stbd, down) in enumerate(self._dirs):
             r = 0.1
@@ -128,9 +127,9 @@ class OracleMapper:
                 r += 0.15
             if not hit[i]:
                 rng[i] = self._fan.max_range
-        omap.update_dvl_ray(rng, self._angles, pose.depth, world_x,
+        omap.update_dvl_ray(rng, self._xz, pose.depth, world_x,
                             hit_surface=hit, vehicle_heading=pose.heading,
-                            can_clear=self._clear, proj_scale=self._proj)
+                            can_clear=self._clear)
         omap.dvl_altitude = alt                      # undo the fan's corruption
         omap.update(pose.depth, pose.heading)        # replan on the filled map
 

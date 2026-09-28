@@ -37,17 +37,16 @@ Eigen::MatrixXd DVLConfig::beam_directions_3d() const {
     return dirs;
 }
 
-std::vector<double> DVLConfig::beam_projection_scale() const {
-    std::vector<double> scale;
-    scale.reserve(beams.size());
-    for (auto& [slant_deg, h_off_deg] : beams) {
-        double s = slant_deg  * M_PI / 180.0;
-        double h = h_off_deg  * M_PI / 180.0;
-        double fwd  = std::sin(s) * std::cos(h);
-        double down = std::cos(s);
-        scale.push_back(std::sqrt(fwd * fwd + down * down));
+Eigen::MatrixXd DVLConfig::beam_xz() const {
+    int n = static_cast<int>(beams.size());
+    Eigen::MatrixXd xz(n, 2);
+    for (int i = 0; i < n; ++i) {
+        double s = beams[i].first  * M_PI / 180.0;
+        double h = beams[i].second * M_PI / 180.0;
+        xz(i, 0) = std::sin(s) * std::cos(h);  // forward
+        xz(i, 1) = std::cos(s);                // down
     }
-    return scale;
+    return xz;
 }
 
 std::vector<bool> DVLConfig::beam_can_clear() const {
@@ -228,40 +227,36 @@ void OccupancyMap::shift_depth(double vehicle_z) {
 
 void OccupancyMap::update_dvl_ray(
     const std::vector<double>& ranges,
-    const std::vector<double>& beam_angles,
+    const Eigen::MatrixXd& beam_xz,
     double vehicle_depth,
     double vehicle_world_x,
     const std::optional<std::vector<bool>>& hit_surface,
     double range_step,
     double vehicle_heading,
-    const std::optional<std::vector<bool>>& can_clear,
-    const std::optional<std::vector<double>>& proj_scale)
+    const std::optional<std::vector<bool>>& can_clear)
 {
-    if (beam_angles.size() != ranges.size())
-        throw std::invalid_argument("update_dvl_ray: beam_angles and ranges must be the same length");
+    if (static_cast<size_t>(beam_xz.rows()) != ranges.size())
+        throw std::invalid_argument("update_dvl_ray: beam_xz must have one row per range");
+    if (beam_xz.cols() != 2)
+        throw std::invalid_argument("update_dvl_ray: beam_xz must be (n_beams, 2) as (forward, down)");
     if (hit_surface.has_value() && hit_surface->size() != ranges.size())
         throw std::invalid_argument("update_dvl_ray: hit_surface must be the same length as ranges");
     if (can_clear.has_value() && can_clear->size() != ranges.size())
         throw std::invalid_argument("update_dvl_ray: can_clear must be the same length as ranges");
-    if (proj_scale.has_value() && proj_scale->size() != ranges.size())
-        throw std::invalid_argument("update_dvl_ray: proj_scale must be the same length as ranges");
 
     const auto& c = cfg_;
     int n = static_cast<int>(ranges.size());
 
     for (int i = 0; i < n; ++i) {
-        // Into the plane, not along the beam.  beam_angles[i] is the direction
-        // of the beam's projection into X-Z; the slant range is its length in
-        // 3-D, which is longer than the projection whenever the beam has a
-        // lateral component.  Using the slant range with the projected angle
-        // puts the return both too far along track and too deep, by 1/scale.
-        // On a flat seabed at 12 m altitude that wrote the aft beams in 0.5 m
-        // deeper than the forward one, so the map sloped where the seabed did
-        // not.
-        double scale     = proj_scale.has_value() ? (*proj_scale)[i] : 1.0;
-        double r_max     = ranges[i] * scale;
+        // Scaling the projected unit direction by the slant range lands on the
+        // projected endpoint.  The shortening for a lateral beam is carried by
+        // the direction vector being shorter than one, so there is nothing
+        // separate to remember: t runs over the slant range, and (ux, uz) turn
+        // it into a displacement inside the plane.
+        double r_max     = ranges[i];
         if (!std::isfinite(r_max)) continue;
-        double ang       = beam_angles[i];
+        double ux        = beam_xz(i, 0);
+        double uz        = beam_xz(i, 1);
         bool   is_hit    = !hit_surface.has_value() || (*hit_surface)[i];
         bool   allow_clear = !can_clear.has_value() || (*can_clear)[i];
 
@@ -271,8 +266,8 @@ void OccupancyMap::update_dvl_ray(
         // incorrectly free voxels the beam never actually passed through.
         if (allow_clear) {
             for (double r = range_step; r < r_max - range_step; r += range_step) {
-                double dx = std::sin(ang) * r;
-                double dz = std::cos(ang) * r;
+                double dx = ux * r;
+                double dz = uz * r;
                 auto [ix, iz] = world_to_grid(vehicle_world_x + dx, vehicle_depth + dz);
                 if (!in_bounds(ix, iz)) continue;
                 grid_(iz, ix) = std::max(c.dvl_min_occ, grid_(iz, ix) - c.dvl_miss_prob);
@@ -283,8 +278,8 @@ void OccupancyMap::update_dvl_ray(
         }
 
         // Endpoint: always mark hit occupied; only clear on miss if axis-aligned.
-        double dx = std::sin(ang) * r_max;
-        double dz = std::cos(ang) * r_max;
+        double dx = ux * r_max;
+        double dz = uz * r_max;
         auto [ix, iz] = world_to_grid(vehicle_world_x + dx, vehicle_depth + dz);
         if (!in_bounds(ix, iz)) continue;
 
@@ -302,13 +297,12 @@ void OccupancyMap::update_dvl_ray(
         double min_vert = std::numeric_limits<double>::infinity();
         for (int i = 0; i < n; ++i) {
             if ((*hit_surface)[i]) {
-                // scale * cos(projected angle) == cos(slant), so this is the
-                // true vertical drop of the beam.  Without the scale it read
-                // cos of the projected angle alone, which for an aft beam is
-                // nearer vertical than the beam really is and so overstated
-                // the altitude by 4.7 percent.
-                double scale = proj_scale.has_value() ? (*proj_scale)[i] : 1.0;
-                double vert = ranges[i] * scale * std::cos(beam_angles[i]);
+                // The down component of the projected direction is cos(slant),
+                // so this is the beam's true vertical drop.  Reading it off the
+                // projected *angle* instead makes an aft beam look nearer
+                // vertical than it is and overstates the altitude by 4.7
+                // percent.
+                double vert = ranges[i] * beam_xz(i, 1);
                 if (vert < min_vert) min_vert = vert;
             }
         }
@@ -1116,14 +1110,11 @@ void ObstacleMapper::update_sensor(SensorType /*type*/, const DVLMeasurement& me
     std::lock_guard<std::mutex> guard(lock_);
     advance_to_pose(pose);
     double fwd_x  = vehicle_forward_x();
-    auto angles    = dvl_config_.beam_angles_rad();
     auto can_clear = dvl_config_.beam_can_clear();
-    auto proj      = dvl_config_.beam_projection_scale();
-    omap_.update_dvl_ray(meas.ranges, angles, pose.depth, fwd_x,
+    omap_.update_dvl_ray(meas.ranges, dvl_config_.beam_xz(), pose.depth, fwd_x,
                          std::optional<std::vector<bool>>(meas.hit_surface),
                          0.15, pose.heading,
-                         std::optional<std::vector<bool>>(can_clear),
-                         std::optional<std::vector<double>>(proj));
+                         std::optional<std::vector<bool>>(can_clear));
     omap_.update(pose.depth, pose.heading);
 }
 

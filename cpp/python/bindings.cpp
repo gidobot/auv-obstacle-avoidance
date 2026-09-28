@@ -44,18 +44,6 @@ static std::optional<std::vector<bool>> obj_to_opt_bool(py::object obj) {
     return result;
 }
 
-static std::optional<std::vector<double>> obj_to_opt_double(py::object obj) {
-    if (obj.is_none()) return std::nullopt;
-    auto arr = py::array_t<double>::ensure(obj);
-    if (!arr) {
-        throw py::type_error("proj_scale must be a numpy double array or None");
-    }
-    auto r = arr.unchecked<1>();
-    std::vector<double> result(static_cast<size_t>(r.shape(0)));
-    for (py::ssize_t i = 0; i < r.shape(0); ++i) result[static_cast<size_t>(i)] = r[i];
-    return result;
-}
-
 // ---------------------------------------------------------------------------
 // Module definition
 // ---------------------------------------------------------------------------
@@ -127,9 +115,9 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
             [](const DVLConfig& self) {
                 return vec_bool_to_numpy(self.beam_can_clear());
             })
-        .def_property_readonly("beam_projection_scale",
-            [](const DVLConfig& self) {
-                return vec_double_to_numpy(self.beam_projection_scale());
+        .def_property_readonly("beam_xz",
+            [](const DVLConfig& self) -> Eigen::MatrixXd {
+                return self.beam_xz();
             })
     ;
 
@@ -254,40 +242,48 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
         .def("update_dvl_ray",
             [](OccupancyMap& self,
                py::array_t<double> ranges_arr,
-               py::array_t<double> beam_angles_arr,
+               py::array_t<double, py::array::c_style | py::array::forcecast> beam_xz_arr,
                double vehicle_depth,
                double vehicle_world_x,
                py::object hit_surface_obj,
                double range_step,
                double vehicle_heading,
-               py::object can_clear_obj,
-               py::object proj_scale_obj)
+               py::object can_clear_obj)
             {
                 auto r = ranges_arr.unchecked<1>();
-                auto a = beam_angles_arr.unchecked<1>();
                 std::vector<double> ranges(static_cast<size_t>(r.shape(0)));
-                std::vector<double> angles(static_cast<size_t>(a.shape(0)));
                 for (py::ssize_t i = 0; i < r.shape(0); ++i)
                     ranges[static_cast<size_t>(i)] = r[i];
-                for (py::ssize_t i = 0; i < a.shape(0); ++i)
-                    angles[static_cast<size_t>(i)] = a[i];
+
+                // Built by hand rather than letting pybind's Eigen caster take
+                // it as an argument.  Everywhere else in this file Eigen is
+                // only ever returned; taking one as input went through a code
+                // path that jumped to a null pointer under LTO.  The caster
+                // copies anyway, so doing it here costs nothing and lets a
+                // wrong shape raise instead of crash.
+                if (beam_xz_arr.ndim() != 2 || beam_xz_arr.shape(1) != 2)
+                    throw py::value_error(
+                        "beam_xz must have shape (n_beams, 2) as (forward, down)");
+                auto b = beam_xz_arr.unchecked<2>();
+                Eigen::MatrixXd beam_xz(b.shape(0), 2);
+                for (py::ssize_t i = 0; i < b.shape(0); ++i) {
+                    beam_xz(i, 0) = b(i, 0);
+                    beam_xz(i, 1) = b(i, 1);
+                }
 
                 auto hit_opt   = obj_to_opt_bool(hit_surface_obj);
                 auto clear_opt = obj_to_opt_bool(can_clear_obj);
-                auto proj_opt  = obj_to_opt_double(proj_scale_obj);
-                self.update_dvl_ray(ranges, angles, vehicle_depth, vehicle_world_x,
-                                    hit_opt, range_step, vehicle_heading, clear_opt,
-                                    proj_opt);
+                self.update_dvl_ray(ranges, beam_xz, vehicle_depth, vehicle_world_x,
+                                    hit_opt, range_step, vehicle_heading, clear_opt);
             },
             py::arg("ranges"),
-            py::arg("beam_angles"),
+            py::arg("beam_xz"),
             py::arg("vehicle_depth"),
             py::arg("vehicle_world_x"),
             py::arg("hit_surface") = py::none(),
             py::arg("range_step") = 0.15,
             py::arg("vehicle_heading") = kNaN,
-            py::arg("can_clear") = py::none(),
-            py::arg("proj_scale") = py::none())
+            py::arg("can_clear") = py::none())
 
         .def("update_altimeter_ray", &OccupancyMap::update_altimeter_ray,
              py::arg("range_m"), py::arg("vehicle_depth"), py::arg("vehicle_world_x"),

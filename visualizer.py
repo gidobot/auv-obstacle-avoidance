@@ -144,6 +144,13 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
   #profContainer { flex: 1 1 0; min-width: 0; }
   #mapCanvas  { width: 420px; height: 420px; }
   #profCanvas { width: 100%; height: 420px; }
+  /* Drag handles between the views.  Sized in px rather than as a border so
+     there is something big enough to grab. */
+  .splitter { background: #2a2a2a; border-radius: 3px; flex: none; }
+  .splitter:hover, .splitter.dragging { background: #3d6da8; }
+  #vsplit { width: 6px; align-self: stretch; cursor: col-resize; }
+  #hsplit { height: 6px; margin: 6px 0; cursor: row-resize; }
+  body.resizing { cursor: inherit; user-select: none; }
   .controls { display: flex; gap: 14px; margin: 10px 0; align-items: center; font-size: 13px; flex-wrap: wrap; }
   .controls label { display: flex; align-items: center; gap: 6px; }
   .controls input[type=range] { width: 80px; }
@@ -279,11 +286,13 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
       <div class="panel-label">Top-down map view</div>
       <canvas id="mapCanvas" width="420" height="420"></canvas>
     </div>
+    <div id="vsplit" class="splitter" title="Drag to resize the top-down map"></div>
     <div id="profContainer">
       <div class="panel-label">2D profile along heading</div>
       <canvas id="profCanvas" height="420"></canvas>
     </div>
   </div>
+  <div id="hsplit" class="splitter" title="Drag to change the profile height"></div>
   <div class="controls">
     <button id="playBtn" onclick="togglePlay()">Play</button>
     <button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>
@@ -405,7 +414,8 @@ function exportTerrain() {
 
 // ---- Top-down terrain map rendering ----
 // Rendered once into an offscreen canvas; overlaid each frame with trail+vehicle.
-const mapW = 420, mapH = 420;
+// Panel sizes, adjustable by dragging the splitters between the views.
+let mapW = 420, mapH = 420, profH = 420;
 let terrainImageData = null;
 
 // Depth-to-colour: Viridis colormap — shallow = bright yellow, deep = dark purple.
@@ -608,18 +618,42 @@ function drawProfile(s) {
   const canvas = document.getElementById('profCanvas');
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
-  const W = rect.width, H = 420;
+  const W = rect.width, H = profH;
   canvas.width = W * dpr; canvas.height = H * dpr;
   canvas.style.height = H + 'px';
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   const ox = 50, oy = 24, gw = W - 90, gh = H - 56;
-  const viewW = s.horizon_fwd + s.horizon_back;
-  const viewH = s.z_max - s.z_min;
-  const sx = gw / viewW, sz = gh / viewH;
-  const viewLeft = s.vehicle_x - s.horizon_back;
-  const vehPx = s.horizon_back * sx;
+
+  // Equal axis spacing.  The two axes used to be scaled independently to
+  // fill the panel, so a metre of depth drew shorter than a metre along
+  // track -- with the usual 30 m x 40 m window in a wide panel that is
+  // nearly 3:1, which flattens every slope and makes a near-vertical drop
+  // look like a ramp.  One scale for both axes instead, chosen so the whole
+  // requested window fits, and the roomier axis then shows more world
+  // rather than stretching what is there.  Nothing is cropped either way.
+  const viewW0 = s.horizon_fwd + s.horizon_back;
+  const viewH0 = s.z_max - s.z_min;
+  const scale = Math.min(gw / viewW0, gh / viewH0);
+  const sx = scale, sz = scale;
+  const viewW = gw / scale, viewH = gh / scale;
+  const viewLeft = s.vehicle_x - s.horizon_back - (viewW - viewW0) / 2;
+  const zTop = s.z_min - (viewH - viewH0) / 2, zBot = zTop + viewH;
+  const vehPx = (s.vehicle_x - viewLeft) * sx;
+
+  // Grid and label spacing follow the scale.  With one scale for both axes
+  // the visible span changes with the panel shape and with every drag of the
+  // splitters, and a fixed 2 m grid becomes a solid block once the view is
+  // wide.  Pick the smallest round step that still leaves the lines apart.
+  const niceStep = (span, px, minPx) => {
+    for (const st of [0.5, 1, 2, 5, 10, 20, 50, 100]) {
+      if (st / span * px >= minPx) return st;
+    }
+    return 200;
+  };
+  const gridX = niceStep(viewW, gw, 22), gridZ = niceStep(viewH, gh, 22);
+  const labX  = niceStep(viewW, gw, 58), labZ  = niceStep(viewH, gh, 30);
 
   ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = 'rgba(15,40,65,0.6)'; ctx.fillRect(0, 0, W, H);
@@ -627,13 +661,13 @@ function drawProfile(s) {
 
   // Grid
   ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 0.5;
-  const fg = Math.ceil(viewLeft / 2) * 2;
-  for (let wX = fg; wX <= viewLeft + viewW; wX += 2) {
+  const fg = Math.ceil(viewLeft / gridX) * gridX;
+  for (let wX = fg; wX <= viewLeft + viewW; wX += gridX) {
     const px = (wX - viewLeft) * sx;
     ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, gh); ctx.stroke();
   }
-  for (let wZ = s.z_min; wZ <= s.z_max; wZ += 2) {
-    const pz = (wZ - s.z_min) * sz;
+  for (let wZ = Math.ceil(zTop / gridZ) * gridZ; wZ <= zBot; wZ += gridZ) {
+    const pz = (wZ - zTop) * sz;
     ctx.beginPath(); ctx.moveTo(0, pz); ctx.lineTo(gw, pz); ctx.stroke();
   }
   ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1;
@@ -642,8 +676,8 @@ function drawProfile(s) {
   ctx.setLineDash([]);
 
   // Water surface line (z=0) — solid green, drawn if within view
-  if (s.z_min <= 0 && s.z_max >= 0) {
-    const py0 = (0 - s.z_min) * sz;
+  if (zTop <= 0 && zBot >= 0) {
+    const py0 = (0 - zTop) * sz;
     ctx.strokeStyle = 'rgba(80,200,90,0.9)'; ctx.lineWidth = 4;
     ctx.beginPath(); ctx.moveTo(0, py0); ctx.lineTo(gw, py0); ctx.stroke();
   }
@@ -654,7 +688,7 @@ function drawProfile(s) {
     ctx.fillStyle = '#4a4a3a'; ctx.beginPath(); ctx.moveTo(0, gh);
     for (let i = 0; i < terrain.length; i++) {
       const px = (terrain[i][0] - viewLeft) * sx;
-      const pz = (terrain[i][1] - s.z_min) * sz;
+      const pz = (terrain[i][1] - zTop) * sz;
       ctx.lineTo(px, Math.min(pz, gh));
     }
     ctx.lineTo(gw, gh); ctx.closePath(); ctx.fill();
@@ -671,7 +705,7 @@ function drawProfile(s) {
       if (p > 0.55) {
         const a = (p - 0.55) / 0.45;
         ctx.fillStyle = `rgba(255,160,40,${(a * 0.65).toFixed(2)})`;
-        ctx.fillRect(cellPx, (s.z_min + iz * s.dz - s.z_min) * sz, cellW + 0.5, s.dz * sz + 0.5);
+        ctx.fillRect(cellPx, (s.z_min + iz * s.dz - zTop) * sz, cellW + 0.5, s.dz * sz + 0.5);
       }
     }
   }
@@ -686,10 +720,10 @@ function drawProfile(s) {
     for (let i = 0; i < nx; i++) {
       if (mz[i] === null) continue;
       const x  = (mOrigin + i * s.dx - viewLeft) * sx;
-      const z  = (mz[i] - s.z_min) * sz;
+      const z  = (mz[i] - zTop) * sz;
       if (prev < 0) { ctx.moveTo(x, z); }
       else {
-        const pzv = (mz[prev] - s.z_min) * sz;
+        const pzv = (mz[prev] - zTop) * sz;
         const px2 = (mOrigin + prev * s.dx - viewLeft) * sx;
         const mid = (px2 + x) / 2;
         if (z < pzv) { ctx.lineTo(mid, pzv); ctx.lineTo(mid, z); ctx.lineTo(x, z); }
@@ -702,7 +736,7 @@ function drawProfile(s) {
   }
 
   // AUV dimensions
-  const auvPxZ   = (s.vehicle_z - s.z_min) * sz;
+  const auvPxZ   = (s.vehicle_z - zTop) * sz;
   const auvPxLen = s.vehicle_length * sx;
   const auvPxH   = Math.max(6, 0.3 * sz);
 
@@ -715,7 +749,7 @@ function drawProfile(s) {
     ctx.moveTo(vehPx, auvPxZ);
     for (let i = 0; i < wp.length; i++) {
       const px = (wp[i][0] - viewLeft) * sx;
-      const pz = (wp[i][1] - s.z_min) * sz;
+      const pz = (wp[i][1] - zTop) * sz;
       ctx.lineTo(px, pz);
     }
     ctx.stroke();
@@ -758,15 +792,15 @@ function drawProfile(s) {
 
   // Axis labels
   ctx.fillStyle = '#666'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
-  const fl = Math.ceil(viewLeft / 5) * 5;
-  for (let wX = fl; wX <= viewLeft + viewW; wX += 5) {
+  const fl = Math.ceil(viewLeft / labX) * labX;
+  for (let wX = fl; wX <= viewLeft + viewW; wX += labX) {
     const px = ox + (wX - viewLeft) * sx;
     const rel = wX - s.vehicle_x;
     ctx.fillText((rel >= 0 ? '+' : '') + rel.toFixed(0) + 'm', px, oy - 6);
   }
   ctx.textAlign = 'right';
-  for (let m = s.z_min; m <= s.z_max; m += 5) {
-    ctx.fillText(m.toFixed(0) + 'm', ox - 4, oy + (m - s.z_min) * sz + 3);
+  for (let m = Math.ceil(zTop / labZ) * labZ; m <= zBot; m += labZ) {
+    ctx.fillText(m.toFixed(0) + 'm', ox - 4, oy + (m - zTop) * sz + 3);
   }
 }
 
@@ -866,7 +900,72 @@ function applyConfig() {
   document.getElementById('wrap').classList.remove('cfg-open');
 }
 
+// --- Resizable views ---------------------------------------------------
+// Two independent handles.  The vertical one sets the size of the top-down
+// map, which stays square so its two world axes keep the same scale, and the
+// profile takes whatever width is left.  The horizontal one sets the profile
+// height on its own, so the occupancy view can be made tall without growing
+// the map to match.
+function applyPanelSizes() {
+  document.getElementById('mapContainer').style.flexBasis = mapW + 'px';
+  const mc = document.getElementById('mapCanvas');
+  mc.style.width = mapW + 'px'; mc.style.height = mapH + 'px';
+  document.getElementById('profCanvas').style.height = profH + 'px';
+  renderTerrainMap();          // the offscreen raster is sized in mapW/mapH
+  if (latestState) draw(latestState);
+  try {
+    localStorage.setItem('oaViewerPanels', JSON.stringify({ mapW, profH }));
+  } catch (e) { /* private window, or site data blocked */ }
+}
+
+function initSplitters() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('oaViewerPanels') || 'null');
+    if (saved && saved.mapW > 0 && saved.profH > 0) {
+      mapW = mapH = saved.mapW; profH = saved.profH;
+    }
+  } catch (e) { /* ignore a corrupt or unreadable entry */ }
+
+  const row = document.querySelector('.row');
+  let drag = null;
+
+  function start(el, axis) {
+    el.addEventListener('pointerdown', (e) => {
+      drag = { axis, x0: e.clientX, y0: e.clientY, w0: mapW, h0: profH };
+      el.setPointerCapture(e.pointerId);
+      el.classList.add('dragging');
+      document.body.classList.add('resizing');
+      e.preventDefault();
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      if (drag.axis === 'x') {
+        // Keep the map square: its width is also its height, so the top-down
+        // view never scales north and east differently.
+        const maxW = Math.max(200, row.clientWidth - 260);
+        mapW = mapH = Math.max(160, Math.min(maxW, drag.w0 + e.clientX - drag.x0));
+      } else {
+        profH = Math.max(160, Math.min(1600, drag.h0 + e.clientY - drag.y0));
+      }
+      applyPanelSizes();
+    });
+    const end = (e) => {
+      if (!drag) return;
+      drag = null;
+      el.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+  }
+  start(document.getElementById('vsplit'), 'x');
+  start(document.getElementById('hsplit'), 'y');
+  applyPanelSizes();
+}
+
 connect();
+initSplitters();
 refreshTerrain3dSec();
 refreshTrajSec();
 window.addEventListener('resize', () => { if (latestState) draw(latestState); });

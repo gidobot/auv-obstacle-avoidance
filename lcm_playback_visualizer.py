@@ -1392,6 +1392,8 @@ class PlaybackServer:
                     elif key is not None and hasattr(self.mapper.omap.cfg, key):
                         setattr(self.mapper.omap.cfg, key, float(val))
                 # Ignore 'configure' commands (no terrain/trajectory to reconfigure)
+        except websockets.exceptions.ConnectionClosed:
+            pass                       # see the live handler
         finally:
             self.clients.discard(websocket)
 
@@ -1435,7 +1437,15 @@ class PlaybackServer:
         print(f"WebSocket:  ws://localhost:{self.ws_port}")
         print("Open the URL above in a browser, then press Play.")
 
-        async with websockets.serve(self._ws_handler, '0.0.0.0', self.ws_port):
+        # The default 20 s ping timeout is too tight here.  The viewer is
+        # watched next to a running simulator, so the browser competes with
+        # Gazebo for the GPU and the tab can miss pings for many seconds --
+        # longer still once it is backgrounded and throttled.  Dropping the
+        # socket for that costs a full terrain resend on every reconnect and
+        # buries the console in tracebacks.  Keep probing every 20 s, but give
+        # the answer two minutes to arrive.
+        async with websockets.serve(self._ws_handler, '0.0.0.0', self.ws_port,
+                                    ping_interval=20, ping_timeout=120):
             await self._playback_loop()
 
 
@@ -1682,6 +1692,14 @@ class LiveServer:
                 await websocket.send(self._latest_state)
             async for _message in websocket:
                 pass   # live mode has no playback controls; ignore client cmds
+        except websockets.exceptions.ConnectionClosed:
+            # A browser that goes away is routine: a reload, a closed tab, or a
+            # keepalive timeout while the page was stalled.  Letting it out of
+            # the handler makes the websockets library log it as "connection
+            # handler failed" with a full traceback, which reads like the
+            # viewer has crashed when it has not -- the client retries after
+            # 2 s and is sent the whole terrain again on reconnect.
+            pass
         finally:
             self.clients.discard(websocket)
 
@@ -1764,7 +1782,15 @@ class LiveServer:
         print(f"  WebSocket:  ws://localhost:{self.ws_port}")
         print("Open the URL above; the occupancy grid renders in the profile view.")
 
-        async with websockets.serve(self._ws_handler, '0.0.0.0', self.ws_port):
+        # The default 20 s ping timeout is too tight here.  The viewer is
+        # watched next to a running simulator, so the browser competes with
+        # Gazebo for the GPU and the tab can miss pings for many seconds --
+        # longer still once it is backgrounded and throttled.  Dropping the
+        # socket for that costs a full terrain resend on every reconnect and
+        # buries the console in tracebacks.  Keep probing every 20 s, but give
+        # the answer two minutes to arrive.
+        async with websockets.serve(self._ws_handler, '0.0.0.0', self.ws_port,
+                                    ping_interval=20, ping_timeout=120):
             await self._broadcast_loop()
 
 

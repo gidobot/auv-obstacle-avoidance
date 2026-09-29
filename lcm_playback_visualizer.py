@@ -161,6 +161,10 @@ let trail = [];
 // Latest sensor returns, in world NED.  Each entry is [north, east, depth]
 // (or null for a beam with no return); the plot's z axis is -depth.
 let dvlHits = [], sonarHit = null, altHit = null;
+// Trace order in the plot, so restyle targets stay in step with initPlot.
+const T_SURFACE = 0, T_TRAIL = 1, T_VEHICLE = 2,
+      T_DVL_RAY = 3, T_DVL_HIT = 4, T_SONAR_RAY = 5, T_SONAR_HIT = 6,
+      T_ALT_RAY = 7, T_ALT_HIT = 8, T_OBSERVED = 9;
 
 // ---------------------------------------------------------------------------
 // Interaction guard — all Plotly updates are deferred while the user has a
@@ -349,6 +353,49 @@ function altHitTrace() {
            showlegend: false, name: 'Altimeter return' };
 }
 
+// Every observed cell, drawn as a point.
+//
+// The surface alone cannot show them all.  Plotly draws a surface quad only
+// where all four corners are present, and connectgaps is off, so a cell whose
+// neighbours are unobserved takes part in four quads that each have three gaps
+// and is drawn by none of them: the measurement exists in the raster and is
+// invisible on screen.  The top-down view has no such rule, it colours the cell
+// and shows it, so the same raster rendered two ways disagreed about what had
+// been measured.
+//
+// Isolated cells are not an edge case here.  Four returns per ping, a fan that
+// spreads them metres apart, and 13 cm of vehicle travel between pings means
+// most cells are seen once or twice, so suppressing them would erase most of
+// the map.
+//
+// Points where the surface has gaps, surface where coverage is dense enough to
+// close: between them nothing measured goes unshown.  Same colour scale as the
+// surface so a point and a patch at one depth read the same.
+function observedCellsTrace() {
+  const tm = terrainMap;
+  const x = [], y = [], z = [], c = [];
+  if (tm) {
+    for (let iy = 0; iy < tm.ny; iy++) {
+      for (let ix = 0; ix < tm.nx; ix++) {
+        const v = tm.data[iy * tm.nx + ix];
+        if (v === null) continue;
+        x.push(tm.ox + (ix + 0.5) * tm.dx);
+        y.push(tm.oy + (iy + 0.5) * tm.dy);
+        z.push(-v);
+        c.push(-v);
+      }
+    }
+  }
+  return {
+    type: 'scatter3d', mode: 'markers', x: x, y: y, z: z,
+    marker: { size: 2.5, color: c, colorscale: 'Viridis', showscale: false,
+              cmin: tm ? -tm.maxZ : -1, cmax: tm ? -tm.minZ : 0 },
+    customdata: c.map(v => -v),
+    hovertemplate: 'N %{x:.1f}  E %{y:.1f}<br>Depth %{customdata:.2f} m<extra></extra>',
+    showlegend: false, name: 'Observed cells',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Layout (used only once at init — never re-applied so camera is preserved)
 // ---------------------------------------------------------------------------
@@ -402,7 +449,7 @@ function initPlot() {
   Plotly.newPlot('plot',
     [surfaceTrace(terrainMap), trailTrace(), vehicleTrace(),
      dvlRayTrace(), dvlHitTrace(), sonarRayTrace(), sonarHitTrace(),
-     altRayTrace(), altHitTrace()],
+     altRayTrace(), altHitTrace(), observedCellsTrace()],
     makeLayout(terrainMap),
     { responsive: true, displaylogo: false,
       modeBarButtonsToRemove: ['resetCameraLastSave3d'] });
@@ -415,14 +462,23 @@ function initPlot() {
 // ---------------------------------------------------------------------------
 function applyTerrainRestyle() {
   const tm = terrainMap;
-  Plotly.restyle('plot', { z: [buildZGrid(tm)], cmin: [-tm.maxZ], cmax: [-tm.minZ] }, [0]);
+  Plotly.restyle('plot', { z: [buildZGrid(tm)], cmin: [-tm.maxZ], cmax: [-tm.minZ] },
+                 [T_SURFACE]);
+  const o = observedCellsTrace();
+  Plotly.restyle('plot', {
+    x: [o.x], y: [o.y], z: [o.z],
+    customdata: [o.customdata],
+    'marker.color': [o.marker.color],
+    'marker.cmin': [o.marker.cmin],
+    'marker.cmax': [o.marker.cmax],
+  }, [T_OBSERVED]);
 }
 function applyVehicleRestyle() {
   Plotly.restyle('plot', {
     x: [trail.map(p=>p[0])], y: [trail.map(p=>p[1])], z: [trail.map(p=>p[2])],
-  }, [1]);
+  }, [T_TRAIL]);
   const p = trail[trail.length-1];
-  Plotly.restyle('plot', { x: [[p[0]]], y: [[p[1]]], z: [[p[2]]] }, [2]);
+  Plotly.restyle('plot', { x: [[p[0]]], y: [[p[1]]], z: [[p[2]]] }, [T_VEHICLE]);
 
   const dRay = rayCoords(dvlHits),  dHit = hitCoords(dvlHits);
   const sRay = rayCoords(sonarHit ? [sonarHit] : []);
@@ -433,8 +489,8 @@ function applyVehicleRestyle() {
     x: [dRay.x, dHit.x, sRay.x, sHit.x, aRay.x, aHit.x],
     y: [dRay.y, dHit.y, sRay.y, sHit.y, aRay.y, aHit.y],
     z: [dRay.z, dHit.z, sRay.z, sHit.z, aRay.z, aHit.z],
-  }, [3, 4, 5, 6, 7, 8]);
-  Plotly.restyle('plot', { customdata: [aHit.z.map(v => -v)] }, [8]);
+  }, [T_DVL_RAY, T_DVL_HIT, T_SONAR_RAY, T_SONAR_HIT, T_ALT_RAY, T_ALT_HIT]);
+  Plotly.restyle('plot', { customdata: [aHit.z.map(v => -v)] }, [T_ALT_HIT]);
 }
 
 function updateHud() {

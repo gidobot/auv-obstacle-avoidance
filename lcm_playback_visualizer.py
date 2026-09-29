@@ -824,122 +824,158 @@ class TerrainAccumulator:
 # Shared browser-client HTML (patched for this tool's WS port + viewport)
 # ---------------------------------------------------------------------------
 
+def _patch(html: str, old: str, new: str, what: str) -> str:
+    """Apply one exact-text edit to the client imported from visualizer.py.
+
+    Exact-text patching fails silently: reword a comment in visualizer.py and
+    the anchor stops matching, ``str.replace`` returns the string unchanged and
+    nothing is raised.  That is not cosmetic here, because the patches are not
+    independent.  The grid-line patch uses ``viewOx``/``viewSize``, which the
+    terrain-background patch introduces, so one miss and one hit together serve
+    a page whose drawTopDown throws ReferenceError on every frame.  draw() then
+    aborts before drawProfile() and the occupancy view is blank, with the
+    server log saying nothing at all -- the failure is only visible in the
+    browser console.
+
+    Refuse to serve a half-patched page instead.
+    """
+    n = html.count(old)
+    if n != 1:
+        raise RuntimeError(
+            f"cannot build the browser client: the anchor for {what} matched "
+            f"{n} times in visualizer.py, expected exactly 1.  visualizer.py "
+            f"has changed under this file; re-sync the anchor.\n"
+            f"--- anchor ---\n{old}\n--- end anchor ---")
+    return html.replace(old, new)
+
+
 def _build_client_html(ws_port: int) -> str:
     """Return the 2D/3D browser client HTML, patched for the given WS port.
 
     Shared by the log-playback server and the live LCM-subscribe server so the
     rendering is identical in both modes.
     """
-    return (
-        HTML_CLIENT_3D
-        # Fix hardcoded WS port
-        .replace("ws://localhost:8081",
-                 f"ws://localhost:{ws_port}")
-        # Null-safe altitude / cmd_depth stats
-        .replace("'Alt: ' + s.altitude.toFixed(2) + 'm'",
-                 "(s.altitude != null ? 'Alt: ' + s.altitude.toFixed(2) + 'm' : 'Alt: --')")
-        .replace("'Cmd: ' + s.cmd_depth.toFixed(2) + 'm'",
-                 "(s.cmd_depth != null ? 'Cmd: ' + s.cmd_depth.toFixed(2) + 'm' : 'Cmd: --')")
-        # Top-down view: keep vehicle centered (replace fixed terrain-origin
-        # coordinate system with a vehicle-centred ±60 m window)
-        .replace(
-            "  // Draw terrain background\n"
-            "  if (terrainImageData) ctx.drawImage(terrainImageData, 0, 0);\n"
-            "\n"
-            "  const { nx, ny, ox, oy, dx, dy } = terrainMap;\n"
-            "  const worldW = nx * dx, worldH = ny * dy;\n"
-            "\n"
-            "  // World → pixel\n"
-            "  function toPixel(wx, wy) {\n"
-            "    return [\n"
-            "      (wx - ox) / worldW * mapW,\n"
-            "      (1 - (wy - oy) / worldH) * mapH,   // north up\n"
-            "    ];\n"
-            "  }",
-            "  const { nx, ny, ox, oy, dx, dy } = terrainMap;\n"
-            "  const worldW = nx * dx, worldH = ny * dy;\n"
-            "\n"
-            "  // Vehicle-centred view: show ±viewHalf metres around the vehicle\n"
-            "  const viewHalf = 60;\n"
-            "  const vwxC = (s.vehicle_wx !== undefined) ? s.vehicle_wx : s.vehicle_x;\n"
-            "  const vyC  = s.vehicle_y || 0;\n"
-            "  const viewOx = vwxC - viewHalf, viewOy = vyC - viewHalf;\n"
-            "  const viewSize = viewHalf * 2;\n"
-            "\n"
-            "  // Draw terrain background sliced to the centred window\n"
-            "  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, mapW, mapH);\n"
-            "  if (terrainImageData) {\n"
-            "    const srcX = (viewOx - ox) / worldW * mapW;\n"
-            "    const srcY = (1 - (viewOy + viewSize - oy) / worldH) * mapH;\n"
-            "    const srcW = viewSize / worldW * mapW;\n"
-            "    const srcH = viewSize / worldH * mapH;\n"
-            "    ctx.drawImage(terrainImageData, srcX, srcY, srcW, srcH, 0, 0, mapW, mapH);\n"
-            "  }\n"
-            "\n"
-            "  // World → pixel (vehicle-centred)\n"
-            "  function toPixel(wx, wy) {\n"
-            "    return [\n"
-            "      (wx - viewOx) / viewSize * mapW,\n"
-            "      (1 - (wy - viewOy) / viewSize) * mapH,  // north up\n"
-            "    ];\n"
-            "  }"
-        )
-        # Update grid-line loop bounds to use the centred view window
-        .replace(
-            "  const gx0 = Math.ceil(ox / 20) * 20;\n"
-            "  for (let gx = gx0; gx <= ox + worldW; gx += 20) {\n"
-            "    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
-            "  }\n"
-            "  const gy0 = Math.ceil(oy / 20) * 20;\n"
-            "  for (let gy = gy0; gy <= oy + worldH; gy += 20) {\n"
-            "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
-            "  }",
-            "  const gx0 = Math.ceil(viewOx / 20) * 20;\n"
-            "  for (let gx = gx0; gx <= viewOx + viewSize; gx += 20) {\n"
-            "    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
-            "  }\n"
-            "  const gy0 = Math.ceil(viewOy / 20) * 20;\n"
-            "  for (let gy = gy0; gy <= viewOy + viewSize; gy += 20) {\n"
-            "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
-            "  }"
-        )
-        # Render unexplored (null) height map cells as dark grey
-        .replace(
-            "      const z = data[ic];\n"
-            "      const [r, g, b] = depthToRgb(z, minZ, maxZ);",
-            "      const z = data[ic];\n"
-            "      let r, g, b;\n"
-            "      if (z == null) { r = g = b = 35; }\n"
-            "      else { [r, g, b] = depthToRgb(z, minZ, maxZ); }"
-        )
-        # Remove Export Terrain button/size input; add 3D Map button
-        .replace(
-            "<button onclick=\"ws.send(JSON.stringify({cmd:'reset'}))\">Reset</button>\n"
-            "    <button onclick=\"exportTerrain()\" title=\"Export current terrain as OBJ mesh"
-            " + height-coloured textured material + PNG heightmap for Blender/Gazebo\">Export Terrain</button>\n"
-            "    <label title=\"Side length of exported terrain (m), centred on origin\">Export size\n"
-            "      <input type=\"number\" id=\"exportSize\" value=\"500\" min=\"50\" max=\"2000\""
-            " step=\"50\" style=\"width:64px\">m\n"
-            "    </label>",
-            "<button onclick=\"ws.send(JSON.stringify({cmd:'reset'}))\">Reset</button>\n"
-            "    <button onclick=\"window.open('/3d','_blank')\" title=\"Open interactive 3D terrain map\">3D Map ↗</button>",
-        )
-        # Hide configure gear button and panel (no terrain/trajectory to reconfigure in LCM mode)
-        .replace(
-            '<button id="cfgBtn" onclick="toggleCfg()" title="Configure simulation">&#9881;</button>',
-            '',
-        )
-        .replace('<div id="cfgPanel">', '<div id="cfgPanel" style="display:none">')
-        # Update page title and heading for LCM context
-        .replace(
-            '<title>AUV Obstacle Avoidance – 3D Simulator</title>',
-            '<title>AUV Obstacle Avoidance – LCM Playback</title>',
-        )
-        .replace(
-            'AUV Obstacle Avoidance Simulator – 3D Mode',
-            'AUV Obstacle Avoidance – LCM Playback',
-        )
-    )
+    h = HTML_CLIENT_3D
+
+    h = _patch(h, "ws://localhost:8081", f"ws://localhost:{ws_port}",
+               "hardcoded WS port")
+
+    # Null-safe altitude / cmd_depth stats
+    h = _patch(h,
+        "'Alt: ' + s.altitude.toFixed(2) + 'm'",
+        "(s.altitude != null ? 'Alt: ' + s.altitude.toFixed(2) + 'm' : 'Alt: --')",
+        "null-safe altitude stat")
+    h = _patch(h,
+        "'Cmd: ' + s.cmd_depth.toFixed(2) + 'm'",
+        "(s.cmd_depth != null ? 'Cmd: ' + s.cmd_depth.toFixed(2) + 'm' : 'Cmd: --')",
+        "null-safe cmd_depth stat")
+
+    # Top-down view: keep the vehicle centred, replacing the fixed
+    # terrain-origin coordinate system with a vehicle-centred window.
+    h = _patch(h,
+        "  // Draw terrain background\n"
+        "  if (terrainImageData) ctx.drawImage(terrainImageData, 0, 0);\n"
+        "\n"
+        "  const { nx, ny, ox, oy, dx, dy } = terrainMap;\n"
+        "  const worldW = nx * dx, worldH = ny * dy;\n",
+
+        "  const { nx, ny, ox, oy, dx, dy } = terrainMap;\n"
+        "  const worldW = nx * dx, worldH = ny * dy;\n"
+        "\n"
+        "  // Vehicle-centred view: show ±viewHalf metres around the vehicle\n"
+        "  const viewHalf = 60;\n"
+        "  const vwxC = (s.vehicle_wx !== undefined) ? s.vehicle_wx : s.vehicle_x;\n"
+        "  const vyC  = s.vehicle_y || 0;\n"
+        "  const viewOx = vwxC - viewHalf, viewOy = vyC - viewHalf;\n"
+        "  const viewSize = viewHalf * 2;\n"
+        "\n"
+        "  // Draw terrain background sliced to the centred window\n"
+        "  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, mapW, mapH);\n"
+        "  if (terrainImageData) {\n"
+        "    const srcX = (viewOx - ox) / worldW * mapW;\n"
+        "    const srcY = (1 - (viewOy + viewSize - oy) / worldH) * mapH;\n"
+        "    const srcW = viewSize / worldW * mapW;\n"
+        "    const srcH = viewSize / worldH * mapH;\n"
+        "    ctx.drawImage(terrainImageData, srcX, srcY, srcW, srcH, 0, 0, mapW, mapH);\n"
+        "  }\n",
+        "vehicle-centred top-down window")
+
+    # toPixel is patched expression by expression rather than as a whole
+    # function: the anchor used to span the function body including a comment
+    # reading "// north up", and when that comment became "// east up, north
+    # right" the patch stopped matching while the grid-line patch below kept
+    # matching, which is exactly the half-patched page _patch now refuses.
+    h = _patch(h,
+        "      (wx - ox) / worldW * mapW,\n",
+        "      (wx - viewOx) / viewSize * mapW,\n",
+        "toPixel north coordinate")
+    h = _patch(h,
+        "      (1 - (wy - oy) / worldH) * mapH,",
+        "      (1 - (wy - viewOy) / viewSize) * mapH,",
+        "toPixel east coordinate")
+
+    # Grid-line loop bounds follow the centred window
+    h = _patch(h,
+        "  const gx0 = Math.ceil(ox / 20) * 20;\n"
+        "  for (let gx = gx0; gx <= ox + worldW; gx += 20) {\n"
+        "    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
+        "  }\n"
+        "  const gy0 = Math.ceil(oy / 20) * 20;\n"
+        "  for (let gy = gy0; gy <= oy + worldH; gy += 20) {\n"
+        "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
+        "  }",
+
+        "  const gx0 = Math.ceil(viewOx / 20) * 20;\n"
+        "  for (let gx = gx0; gx <= viewOx + viewSize; gx += 20) {\n"
+        "    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
+        "  }\n"
+        "  const gy0 = Math.ceil(viewOy / 20) * 20;\n"
+        "  for (let gy = gy0; gy <= viewOy + viewSize; gy += 20) {\n"
+        "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
+        "  }",
+        "grid-line bounds")
+
+    # Render unexplored (null) height map cells as dark grey
+    h = _patch(h,
+        "      const z = data[ic];\n"
+        "      const [r, g, b] = depthToRgb(z, minZ, maxZ);",
+        "      const z = data[ic];\n"
+        "      let r, g, b;\n"
+        "      if (z == null) { r = g = b = 35; }\n"
+        "      else { [r, g, b] = depthToRgb(z, minZ, maxZ); }",
+        "unexplored-cell shading")
+
+    # Remove Export Terrain button/size input; add 3D Map button
+    h = _patch(h,
+        "<button onclick=\"ws.send(JSON.stringify({cmd:'reset'}))\">Reset</button>\n"
+        "    <button onclick=\"exportTerrain()\" title=\"Export current terrain as OBJ mesh"
+        " + height-coloured textured material + PNG heightmap for Blender/Gazebo\">Export Terrain</button>\n"
+        "    <label title=\"Side length of exported terrain (m), centred on origin\">Export size\n"
+        "      <input type=\"number\" id=\"exportSize\" value=\"500\" min=\"50\" max=\"2000\""
+        " step=\"50\" style=\"width:64px\">m\n"
+        "    </label>",
+        "<button onclick=\"ws.send(JSON.stringify({cmd:'reset'}))\">Reset</button>\n"
+        "    <button onclick=\"window.open('/3d','_blank')\" title=\"Open interactive 3D terrain map\">3D Map ↗</button>",
+        "Export Terrain -> 3D Map button")
+
+    # Hide configure gear button and panel (nothing to reconfigure in LCM mode)
+    h = _patch(h,
+        '<button id="cfgBtn" onclick="toggleCfg()" title="Configure simulation">&#9881;</button>',
+        '', "configure gear button")
+    h = _patch(h, '<div id="cfgPanel">', '<div id="cfgPanel" style="display:none">',
+               "configure panel")
+
+    # Page title and heading for LCM context
+    h = _patch(h,
+        '<title>AUV Obstacle Avoidance – 3D Simulator</title>',
+        '<title>AUV Obstacle Avoidance – LCM Playback</title>',
+        "page title")
+    h = _patch(h,
+        'AUV Obstacle Avoidance Simulator – 3D Mode',
+        'AUV Obstacle Avoidance – LCM Playback',
+        "page heading")
+
+    return h
 
 
 def _build_3d_html(ws_port: int) -> str:

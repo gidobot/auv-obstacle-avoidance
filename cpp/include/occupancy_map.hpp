@@ -502,6 +502,16 @@ public:
     void   set_dvl_altitude(double v)  { dvl_altitude_ = v; }
     double shift_accum()         const { return shift_accum_; }
 
+    /// True when the safety tail check capped the vehicle-column command,
+    /// i.e. the map wanted the vehicle deeper here and the tail forbade it.
+    ///
+    /// This is the one state the vehicle cannot leave on its own on the
+    /// altitude path: the cap holds until the vehicle moves forward, and the
+    /// local planner will not move forward until it has reached the altitude
+    /// it is being denied.  Published so the planner can count the waypoint as
+    /// reached instead of waiting on a depth that will never arrive.
+    bool descent_blocked()       const { return descent_blocked_; }
+
     const std::string&                    control_mode()      const { return control_mode_; }
     const Eigen::MatrixXd&                grid()              const { return grid_; }
     const Eigen::VectorXd&                manifold_z()        const { return manifold_z_; }
@@ -524,6 +534,7 @@ private:
     /// Shifts with the vehicle so the vehicle stays centred in the window.
     double grid_origin_z_;
     double shift_accum_;
+    bool   descent_blocked_ = false;
     double shift_accum_z_;
 
     Eigen::VectorXi manifold_iz_;       // length nx

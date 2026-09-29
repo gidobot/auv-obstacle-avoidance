@@ -322,6 +322,8 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
         .def_property("dvl_altitude",
                       &OccupancyMap::dvl_altitude, &OccupancyMap::set_dvl_altitude)
         .def_property_readonly("control_mode",           &OccupancyMap::control_mode)
+        .def_property_readonly("descent_blocked",
+            [](const OccupancyMap& self) { return self.descent_blocked(); })
         .def_property_readonly("shift_accum",            &OccupancyMap::shift_accum)
 
         // Grid and manifold arrays — return references (no copy) where possible

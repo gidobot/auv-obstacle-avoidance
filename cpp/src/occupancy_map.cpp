@@ -772,6 +772,11 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
 
     // ----- Step 2c: apply latch -----
     if (cliff_top_committed_) {
+        // The latch caps towards the surface, so the vehicle can always climb
+        // out of it; it is never the reason a descent is stuck.  This path
+        // returns before the tail check runs, so clear the flag rather than
+        // leaving the last value standing.
+        descent_blocked_ = false;
         double effective = cliff_top_target_z_;
         for (int ix = cx_; ix < nx_; ++ix) {
             cmd_depth_[ix] = effective;
@@ -798,6 +803,12 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
     // between them changes no actuator output, and the 40.6 m total sits within
     // 0.6 m of the terrain's own 40.0 m approach-plus-tail-clearance budget.
     bool tail_blocked = safety_tail_blocked(vehicle_depth);
+
+    // Only the vehicle column matters for the flag: it is the one the planner
+    // is trying to reach an altitude at.  Recorded before the cap, since the
+    // cap is what erases the evidence.
+    descent_blocked_ = tail_blocked && !std::isnan(cmd_depth_[cx_])
+                                    && cmd_depth_[cx_] > vehicle_depth;
 
     if (tail_blocked) {
         for (int ix = cx_; ix < nx_; ++ix) {

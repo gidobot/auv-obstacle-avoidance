@@ -202,6 +202,48 @@ def test_cliff_run():
     print(f"  mode runs: {mode_runs(modes)}")
     print("PASS test_cliff_run")
 
+def test_descent_blocked():
+    """The tail check must raise descent_blocked, and only when it is the cause.
+
+    Constructed so the tail is genuinely blocked: terrain just below the vehicle
+    behind it, and deeper water ahead, so the map wants to descend and the tail
+    check forbids it.  That combination is the deadlock the flag exists to break
+    — the planner would otherwise wait for an altitude the mapper will not
+    release until the vehicle moves, while the vehicle waits for the planner.
+    """
+    VZ = 18.0
+    def shelf(x):
+        # behind the vehicle a shelf 0.5 m under the hull, ahead a drop-off
+        return 18.5 if x < 5.0 else 30.0
+
+    mapper = make_mapper()
+    blocked = []
+    for s in range(40):
+        x = s * 0.5
+        ranges, hits = cast_dvl(cpp.DVLConfig(), x, VZ, shelf)
+        mapper.update_sensor(cpp.SensorType.DVL,
+                             cpp.DVLMeasurement(ranges, hits),
+                             cpp.Pose(north=x, east=0, depth=VZ, heading=0))
+        blocked.append(bool(mapper.omap.descent_blocked))
+
+    assert any(blocked), "tail over a shelf 0.5 m below the hull never set descent_blocked"
+    print(f"  descent_blocked on {sum(blocked)}/{len(blocked)} cycles over the shelf")
+
+    # ...and must stay clear on open flat ground, where nothing is behind.
+    flat_mapper = make_mapper()
+    flat_blocked = []
+    for s in range(40):
+        x = s * 0.5
+        ranges, hits = cast_dvl(cpp.DVLConfig(), x, VZ, flat_terrain)
+        flat_mapper.update_sensor(cpp.SensorType.DVL,
+                                  cpp.DVLMeasurement(ranges, hits),
+                                  cpp.Pose(north=x, east=0, depth=VZ, heading=0))
+        flat_blocked.append(bool(flat_mapper.omap.descent_blocked))
+    assert not any(flat_blocked), \
+        f"descent_blocked fired on flat terrain ({sum(flat_blocked)} cycles)"
+    print("  clear on flat terrain, as it must be")
+    print("PASS test_descent_blocked")
+
 # ── test 4: grid snapshot ────────────────────────────────────────────────────
 
 def test_grid_snapshot():
@@ -240,6 +282,7 @@ if __name__ == '__main__':
     test_flat_terrain_altitude()
     test_flat_terrain_holds_imaging_altitude()
     test_cliff_run()
+    test_descent_blocked()
     test_grid_snapshot()
     test_cmd_depth_access()
     print("\nAll tests passed.")

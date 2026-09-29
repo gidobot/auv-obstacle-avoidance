@@ -633,12 +633,24 @@ function drawProfile(s) {
   // look like a ramp.  One scale for both axes instead, chosen so the whole
   // requested window fits, and the roomier axis then shows more world
   // rather than stretching what is there.  Nothing is cropped either way.
-  const viewW0 = s.horizon_fwd + s.horizon_back;
+  // Fit the whole map, not just the sensor horizon.  The occupancy raster
+  // is nx*dx wide from grid_origin_x and the manifold carries its own
+  // origin, so sizing the view from horizon_fwd + horizon_back alone left
+  // the far edge of the raster, and any offset manifold, hanging outside
+  // the plot box -- most visible once the panel was dragged small, because
+  // the overhang is a fixed number of metres however few pixels remain.
+  const mOrigin = s.manifold_grid_origin_x !== undefined
+                  ? s.manifold_grid_origin_x : s.grid_origin_x;
+  const spanX = s.nx * s.dx;
+  const contentL = Math.min(s.vehicle_x - s.horizon_back, s.grid_origin_x, mOrigin);
+  const contentR = Math.max(s.vehicle_x + s.horizon_fwd,
+                            s.grid_origin_x + spanX, mOrigin + spanX);
+  const viewW0 = contentR - contentL;
   const viewH0 = s.z_max - s.z_min;
   const scale = Math.min(gw / viewW0, gh / viewH0);
   const sx = scale, sz = scale;
   const viewW = gw / scale, viewH = gh / scale;
-  const viewLeft = s.vehicle_x - s.horizon_back - (viewW - viewW0) / 2;
+  const viewLeft = contentL - (viewW - viewW0) / 2;
   const zTop = s.z_min - (viewH - viewH0) / 2, zBot = zTop + viewH;
   const vehPx = (s.vehicle_x - viewLeft) * sx;
 
@@ -658,6 +670,11 @@ function drawProfile(s) {
   ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = 'rgba(15,40,65,0.6)'; ctx.fillRect(0, 0, W, H);
   ctx.save(); ctx.translate(ox, oy);
+  // Clip to the plot box.  The sonar cone reaches 12 m past the nose, the DVL
+  // beams 6 m below it and the vehicle body is drawn at a pixel minimum, none
+  // of which are bounded by the view, so without this they spill over the
+  // axis labels and past the edge of the canvas whenever the panel is small.
+  ctx.beginPath(); ctx.rect(0, 0, gw, gh); ctx.clip();
 
   // Grid
   ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 0.5;
@@ -712,8 +729,6 @@ function drawProfile(s) {
 
   // Manifold
   const mz = s.manifold_z;
-  const mOrigin = s.manifold_grid_origin_x !== undefined
-                  ? s.manifold_grid_origin_x : s.grid_origin_x;
   if (mz) {
     ctx.strokeStyle = 'rgba(226,75,74,0.85)'; ctx.lineWidth = 2; ctx.beginPath();
     let prev = -1;

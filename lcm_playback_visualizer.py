@@ -627,12 +627,26 @@ where a 2-D prediction belongs.
 
 
 class TerrainAccumulator:
-    """Sparse world-frame bathymetry raster built from sensor returns.
+    """Sparse world-frame height map built from sensor returns.
 
-    Each cell keeps the *shallowest* depth ever observed in it.  That is the
-    surface the survey has to clear: a beam grazing a cliff face reports
-    something deeper than the ridge line above it, and averaging the two would
-    quietly bury the ridge.
+    A measurement map, not an occupancy grid.  Each return is a position in the
+    world where a beam met the seabed, so the cell containing it takes that
+    height directly and the most recent observation wins.  There is no
+    probability, no accumulation and no threshold: one return is enough to set
+    a cell, and a later return replaces it.
+
+    Deliberately unlike the 2-D occupancy grid, which is probabilistic because
+    it answers a different question.  That grid has to decide whether a voxel
+    is safe to fly through, so it weighs repeated evidence, holds a prior and
+    keeps the shallowest occupied voxel per column.  This map only has to say
+    what the seabed height was where something was measured.
+
+    This used to keep the shallowest depth ever seen in each cell, which is
+    clearance semantics borrowed from the other map.  It made every write
+    permanent and every error unrecoverable: one bad return, or in practice one
+    column of fabricated manifold, ratcheted a cell shallow and nothing later
+    could bring it back.  Latest-wins is both the right meaning and
+    self-correcting.
 
     Shared by log playback and live mode so both render the same seafloor.
     """
@@ -700,14 +714,19 @@ class TerrainAccumulator:
         self.dirty = False
 
     def record(self, world_x: float, world_y: float, depth: float) -> None:
-        """Record one terrain observation, keeping the shallowest per cell."""
+        """Set the cell containing this return to its measured height.
+
+        One observation is enough, and it takes effect at once.  A later
+        observation of the same cell replaces the earlier one rather than being
+        combined with it, so the map follows the most recent measurement and
+        recovers from a bad one.
+        """
         if not np.isfinite(depth) or depth < 0.0:
             return
         ix = int(np.floor((world_x - self.ox) / self.dx))
         iy = int(np.floor((world_y - self.oy) / self.dy))
         if 0 <= ix < self.nx and 0 <= iy < self.ny:
-            existing = self.height_map[iy, ix]
-            if np.isnan(existing) or depth < existing:
+            if self.height_map[iy, ix] != depth:
                 self.height_map[iy, ix] = depth
                 self.dirty = True
 

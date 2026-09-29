@@ -1621,8 +1621,31 @@ class LiveServer:
             self.clients.discard(websocket)
 
     def _lcm_thread(self):
+        # One undecodable message must not take the whole viewer down with it.
+        #
+        # lcm-python lets an exception raised inside a subscription callback
+        # propagate out of handle_timeout, so without this a single bad message
+        # on one channel escapes the loop and kills the thread.  Every other
+        # channel then goes quiet too: the HTTP and WebSocket servers keep
+        # serving, the page still loads, and the terrain simply never fills.
+        # Nothing says why.
+        #
+        # The way to provoke it is a changed LCM type: regenerate the Python
+        # bindings, leave the publisher running on the old fingerprint, and
+        # every OA_COMMAND raises ValueError("Decode error").
+        seen = set()
         while True:
-            self._lc.handle_timeout(200)
+            try:
+                self._lc.handle_timeout(200)
+            except Exception as exc:                      # noqa: BLE001
+                key = f"{type(exc).__name__}:{exc}"[:120]
+                if key not in seen:
+                    seen.add(key)
+                    print(f"WARNING: dropping undecodable LCM message ({key}). "
+                          f"If this is a decode error, the generated types and "
+                          f"the publisher disagree -- rebuild the lcmtypes and "
+                          f"restart the publisher. Other channels continue.",
+                          file=sys.stderr)
 
     async def start(self):
         import lcm

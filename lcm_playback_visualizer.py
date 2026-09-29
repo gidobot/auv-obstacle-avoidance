@@ -357,7 +357,7 @@ function makeLayout(tm) {
     paper_bgcolor: '#111', plot_bgcolor: '#111',
     font:   { color: '#ccc', family: "'Menlo','Consolas',monospace" },
     margin: { l: 0, r: 80, t: 36, b: 0 },
-    title:  { text: 'Seafloor Terrain — LCM Playback',
+    title:  { text: 'Seafloor Terrain — north right, east up, as the top-down view',
               font: { color: '#666', size: 12 }, x: 0.46 },
     scene: {
       bgcolor: '#0b1622',
@@ -382,7 +382,14 @@ function makeLayout(tm) {
         const base = Math.max(Lx, Ly);     // normalise to larger dimension
         return { x: Lx / base, y: Ly / base, z: 0.35 };
       })(),
-      camera: { eye: { x: 1.5, y: -1.5, z: 0.9 }, up: { x: 0, y: 0, z: 1 } },
+      // Open oriented like the top-down view so the two can be read against
+      // each other: north to the right, east up the screen.  up = +y makes
+      // east the screen vertical, and an eye that is mostly +z looks down the
+      // way the 2-D map does, with just enough offset left in to show relief.
+      // Both views index the same raster the same way (data[iy*nx + ix], x
+      // north, y east); only the presentation differed, so this is the whole
+      // of the correspondence.  Drag still rotates it freely.
+      camera: { eye: { x: 0.15, y: -0.15, z: 2.0 }, up: { x: 0, y: 1, z: 0 } },
     },
   };
 }

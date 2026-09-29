@@ -439,7 +439,7 @@ function renderTerrainMap() {
     for (let px = 0; px < mapW; px++) {
       // Map pixel -> world (x, y)
       const wx = ox + (px / mapW) * (nx * dx);
-      const wy = oy + (1 - py / mapH) * (ny * dy);  // y flipped (north up)
+      const wy = oy + (1 - py / mapH) * (ny * dy);  // second axis (east) up the screen
       // Bilinear sample
       const ix = Math.floor((wx - ox) / dx);
       const iy = Math.floor((wy - oy) / dy);
@@ -479,7 +479,7 @@ function drawTopDown(s) {
   function toPixel(wx, wy) {
     return [
       (wx - ox) / worldW * mapW,
-      (1 - (wy - oy) / worldH) * mapH,   // north up
+      (1 - (wy - oy) / worldH) * mapH,   // east up, north right
     ];
   }
 

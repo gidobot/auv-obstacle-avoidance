@@ -657,8 +657,19 @@ function drawProfile(s) {
   const viewH0 = s.z_max - s.z_min;
   const scale = Math.min(gw / viewW0, gh / viewH0);
   const sx = scale, sz = scale;
-  const viewW = gw / scale, viewH = gh / scale;
-  const viewLeft = contentL - (viewW - viewW0) / 2;
+
+  // Cap the window at the map.  In a short wide panel the depth axis sets
+  // the scale and the spare width was being spent showing more along track
+  // than the map covers -- 89 m of window around a 30 m map at 900x420, so
+  // the map itself drew small in the middle with empty water either side and
+  // narrowing the panel changed nothing until it got narrower than the map.
+  // Never show more than the map extent; centre whatever width is left over.
+  // The depth axis keeps its slack, so the whole water column stays visible.
+  const viewW = viewW0, viewH = gh / scale;
+  const gwEff = viewW * scale;                 // plot width actually used
+  const padX = Math.max(0, (gw - gwEff) / 2);  // centre it in the panel
+  const plotX = ox + padX;
+  const viewLeft = contentL;
   const zTop = s.z_min - (viewH - viewH0) / 2, zBot = zTop + viewH;
   const vehPx = (s.vehicle_x - viewLeft) * sx;
 
@@ -672,17 +683,17 @@ function drawProfile(s) {
     }
     return 200;
   };
-  const gridX = niceStep(viewW, gw, 22), gridZ = niceStep(viewH, gh, 22);
-  const labX  = niceStep(viewW, gw, 58), labZ  = niceStep(viewH, gh, 30);
+  const gridX = niceStep(viewW, gwEff, 22), gridZ = niceStep(viewH, gh, 22);
+  const labX  = niceStep(viewW, gwEff, 58), labZ  = niceStep(viewH, gh, 30);
 
   ctx.fillStyle = '#111'; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = 'rgba(15,40,65,0.6)'; ctx.fillRect(0, 0, W, H);
-  ctx.save(); ctx.translate(ox, oy);
+  ctx.save(); ctx.translate(plotX, oy);
   // Clip to the plot box.  The sonar cone reaches 12 m past the nose, the DVL
   // beams 6 m below it and the vehicle body is drawn at a pixel minimum, none
   // of which are bounded by the view, so without this they spill over the
   // axis labels and past the edge of the canvas whenever the panel is small.
-  ctx.beginPath(); ctx.rect(0, 0, gw, gh); ctx.clip();
+  ctx.beginPath(); ctx.rect(0, 0, gwEff, gh); ctx.clip();
 
   // Grid
   ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 0.5;
@@ -693,7 +704,7 @@ function drawProfile(s) {
   }
   for (let wZ = Math.ceil(zTop / gridZ) * gridZ; wZ <= zBot; wZ += gridZ) {
     const pz = (wZ - zTop) * sz;
-    ctx.beginPath(); ctx.moveTo(0, pz); ctx.lineTo(gw, pz); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, pz); ctx.lineTo(gwEff, pz); ctx.stroke();
   }
   ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1;
   ctx.setLineDash([4, 3]);
@@ -704,7 +715,7 @@ function drawProfile(s) {
   if (zTop <= 0 && zBot >= 0) {
     const py0 = (0 - zTop) * sz;
     ctx.strokeStyle = 'rgba(80,200,90,0.9)'; ctx.lineWidth = 4;
-    ctx.beginPath(); ctx.moveTo(0, py0); ctx.lineTo(gw, py0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, py0); ctx.lineTo(gwEff, py0); ctx.stroke();
   }
 
   // Terrain
@@ -716,7 +727,7 @@ function drawProfile(s) {
       const pz = (terrain[i][1] - zTop) * sz;
       ctx.lineTo(px, Math.min(pz, gh));
     }
-    ctx.lineTo(gw, gh); ctx.closePath(); ctx.fill();
+    ctx.lineTo(gwEff, gh); ctx.closePath(); ctx.fill();
   }
 
   // Occupancy voxels (drawn after terrain so they appear on top)
@@ -724,7 +735,7 @@ function drawProfile(s) {
   for (let ix = 0; ix < nx; ix++) {
     const cellWX = s.grid_origin_x + ix * s.dx;
     const cellPx = (cellWX - viewLeft) * sx, cellW = s.dx * sx;
-    if (cellPx + cellW < -1 || cellPx > gw + 1) continue;
+    if (cellPx + cellW < -1 || cellPx > gwEff + 1) continue;
     for (let iz = 0; iz < nz; iz++) {
       const p = grid[iz * nx + ix];
       if (p > 0.55) {
@@ -817,13 +828,13 @@ function drawProfile(s) {
   ctx.fillStyle = '#666'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
   const fl = Math.ceil(viewLeft / labX) * labX;
   for (let wX = fl; wX <= viewLeft + viewW; wX += labX) {
-    const px = ox + (wX - viewLeft) * sx;
+    const px = plotX + (wX - viewLeft) * sx;
     const rel = wX - s.vehicle_x;
     ctx.fillText((rel >= 0 ? '+' : '') + rel.toFixed(0) + 'm', px, oy - 6);
   }
   ctx.textAlign = 'right';
   for (let m = Math.ceil(zTop / labZ) * labZ; m <= zBot; m += labZ) {
-    ctx.fillText(m.toFixed(0) + 'm', ox - 4, oy + (m - zTop) * sz + 3);
+    ctx.fillText(m.toFixed(0) + 'm', plotX - 4, oy + (m - zTop) * sz + 3);
   }
 }
 

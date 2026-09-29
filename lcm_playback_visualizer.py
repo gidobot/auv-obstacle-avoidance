@@ -707,12 +707,20 @@ class TerrainAccumulator:
     Shared by log playback and live mode so both render the same seafloor.
     """
 
-    #: Target cell size (m).  The sensors sample far finer than this along
-    #: track -- at 0.5 m/s and 8 Hz the DVL lands a triple every 6 cm -- so
-    #: the raster, not the data, is what limits detail.  At the 2 m this used
-    #: to be, the sawtooth test terrain's 70 deg face (7.2 m horizontal) was
-    #: 3.6 cells wide and read as a smooth ramp.
-    CELL_M = 0.5
+    #: Target cell size (m), overridable with --terrain-cell.
+    #:
+    #: A coverage-against-detail trade, and coverage is the binding constraint.
+    #: Along track the returns are dense, but across track they are not: the
+    #: DVL fan puts its beams 0.36*altitude apart, so at 15 m of altitude
+    #: neighbouring beams land 5 m from each other and no plausible cell size
+    #: closes that gap.  What a larger cell does buy is that the returns which
+    #: do fall near each other share a cell, so the surface can close instead
+    #: of breaking into isolated points.
+    #:
+    #: 1 m is the compromise.  At 0.5 m most cells held a single return and the
+    #: surface could not form; at the 2 m this started as, the sawtooth's 3.64 m
+    #: face spanned under two cells and read as a ramp.
+    CELL_M = 1.0
 
     #: ...but the whole raster is re-serialised on every broadcast, so cap the
     #: cell count and coarsen instead of blowing up the payload on a big area.
@@ -958,8 +966,10 @@ class PlaybackServer:
         lcm_types_path: str = _DEFAULT_LCM_TYPES_PATH,
         sonar_max_range: Optional[float] = None,
         altimeter_max_range: Optional[float] = None,
+        terrain_cell: Optional[float] = None,
     ):
         self.events = events
+        self._terrain_cell = terrain_cell
         self.vehicle_name = vehicle_name
         self.log_path = log_path
         self.http_port = http_port
@@ -1053,7 +1063,7 @@ class PlaybackServer:
                     track.append((msg.y, msg.x) if self.swap_xy else (msg.x, msg.y))
                 except Exception:
                     pass
-        return TerrainAccumulator.around(track)
+        return TerrainAccumulator.around(track, cell=self._terrain_cell)
 
     # ------------------------------------------------------------------
     # Pose helpers
@@ -1457,8 +1467,10 @@ class LiveServer:
         mission: Optional[str] = None,
         sonar_max_range: Optional[float] = None,
         altimeter_max_range: Optional[float] = None,
+        terrain_cell: Optional[float] = None,
     ):
         self.vehicle_name = vehicle_name
+        self._terrain_cell = terrain_cell
         self.http_port = http_port
         self.ws_port = ws_port
         self.lcm_types_path = lcm_types_path
@@ -1496,7 +1508,8 @@ class LiveServer:
         if self._mission_path:
             print(f"mission: {len(self._mission_path)} waypoints from {mission}")
             self._terrain = TerrainAccumulator.around(
-                self._mission_path, mission_path=self._mission_path)
+                self._mission_path, cell=self._terrain_cell,
+                mission_path=self._mission_path)
         else:
             self._terrain = None
 
@@ -1513,7 +1526,8 @@ class LiveServer:
         if self._terrain is None:
             # No mission to size the raster from — centre it on the first fix.
             self._terrain = TerrainAccumulator.around([(self._nav_x, self._nav_y)],
-                                                      margin=120.0)
+                                                      margin=120.0,
+                                                      cell=self._terrain_cell)
             self._terrain.dirty = True
 
         # Trail comes from nav, not from the gridmap: the gridmap is decimated
@@ -1791,6 +1805,11 @@ def main() -> None:
                         help="Sonar max range (m) used to classify no-returns. Set this to "
                              "the vehicle's oa-mapper sonar_max_range so playback matches "
                              "what the vehicle did (cheryl.cfg: 20, seeker-sitl.cfg: 100)")
+    parser.add_argument('--terrain-cell', type=float, metavar='M',
+                        help='Cell size of the 3-D height map (m; default %.1f). '
+                             'Larger cells gather sparse returns together so the '
+                             'surface can close; smaller ones keep detail where '
+                             'coverage is dense.' % TerrainAccumulator.CELL_M)
     parser.add_argument('--altimeter-max-range', type=float, metavar='M',
                         help="Altimeter max range (m) used to classify no-returns. Set this "
                              "to the vehicle's oa-mapper altimeter_max_range (cheryl.cfg and "
@@ -1816,6 +1835,7 @@ def main() -> None:
             mission=args.mission,
             sonar_max_range=args.sonar_max_range,
             altimeter_max_range=args.altimeter_max_range,
+            terrain_cell=args.terrain_cell,
         )
         asyncio.run(live.start())
         return
@@ -1857,6 +1877,7 @@ def main() -> None:
         lcm_types_path=args.lcm_types_path,
         sonar_max_range=args.sonar_max_range,
         altimeter_max_range=args.altimeter_max_range,
+        terrain_cell=args.terrain_cell,
     )
 
     asyncio.run(server.start())

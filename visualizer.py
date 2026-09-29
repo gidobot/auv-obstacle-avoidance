@@ -140,9 +140,13 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
   h1 { font-size: 16px; font-weight: 400; margin-bottom: 8px; color: #888; }
   .row { display: flex; gap: 12px; align-items: flex-start; }
   canvas { border-radius: 6px; background: #111; display: block; }
-  #mapContainer { flex: 0 0 420px; }
+  /* The map may shrink (flex-shrink 1).  With 0 it kept its full width in a
+     narrow window, the profile absorbed the whole shortfall down to zero
+     width, and the map then hung outside the row.  max-width is the backstop:
+     whatever the width ends up being, the canvas cannot exceed its pane. */
+  #mapContainer { flex: 0 1 420px; min-width: 0; }
   #profContainer { flex: 1 1 0; min-width: 0; }
-  #mapCanvas  { width: 420px; height: 420px; }
+  #mapCanvas  { width: 420px; max-width: 100%; height: auto; }
   #profCanvas { width: 100%; height: 420px; }
   /* Drag handles between the views.  Sized in px rather than as a border so
      there is something big enough to grab. */
@@ -415,6 +419,10 @@ function exportTerrain() {
 // ---- Top-down terrain map rendering ----
 // Rendered once into an offscreen canvas; overlaid each frame with trail+vehicle.
 // Panel sizes, adjustable by dragging the splitters between the views.
+// mapWPref is what the drag asked for; mapW is that clamped to what the
+// window can actually give, so narrowing the window scales the map down and
+// widening it again restores the size that was asked for.
+let mapWPref = 420;
 let mapW = 420, mapH = 420, profH = 420;
 let terrainImageData = null;
 
@@ -921,15 +929,26 @@ function applyConfig() {
 // profile takes whatever width is left.  The horizontal one sets the profile
 // height on its own, so the occupancy view can be made tall without growing
 // the map to match.
+const PROF_MIN_W = 200;   // the profile never collapses below this
+const MAP_MIN_W  = 120;
+
 function applyPanelSizes() {
+  const row = document.querySelector('.row');
+  // Row width less the gaps and the splitter, minus the profile's floor, is
+  // all the map can have.  Without this the map wins every shortfall.
+  const avail = row.clientWidth - 30;
+  mapW = mapH = Math.max(MAP_MIN_W, Math.min(mapWPref, avail - PROF_MIN_W));
+
   document.getElementById('mapContainer').style.flexBasis = mapW + 'px';
   const mc = document.getElementById('mapCanvas');
-  mc.style.width = mapW + 'px'; mc.style.height = mapH + 'px';
+  mc.style.width = mapW + 'px';        // height follows from height:auto and
+                                       // the square bitmap, so it stays square
   document.getElementById('profCanvas').style.height = profH + 'px';
   renderTerrainMap();          // the offscreen raster is sized in mapW/mapH
   if (latestState) draw(latestState);
   try {
-    localStorage.setItem('oaViewerPanels', JSON.stringify({ mapW, profH }));
+    localStorage.setItem('oaViewerPanels',
+                         JSON.stringify({ mapW: mapWPref, profH }));
   } catch (e) { /* private window, or site data blocked */ }
 }
 
@@ -937,7 +956,7 @@ function initSplitters() {
   try {
     const saved = JSON.parse(localStorage.getItem('oaViewerPanels') || 'null');
     if (saved && saved.mapW > 0 && saved.profH > 0) {
-      mapW = mapH = saved.mapW; profH = saved.profH;
+      mapWPref = saved.mapW; profH = saved.profH;
     }
   } catch (e) { /* ignore a corrupt or unreadable entry */ }
 
@@ -946,7 +965,7 @@ function initSplitters() {
 
   function start(el, axis) {
     el.addEventListener('pointerdown', (e) => {
-      drag = { axis, x0: e.clientX, y0: e.clientY, w0: mapW, h0: profH };
+      drag = { axis, x0: e.clientX, y0: e.clientY, w0: mapWPref, h0: profH };
       el.setPointerCapture(e.pointerId);
       el.classList.add('dragging');
       document.body.classList.add('resizing');
@@ -957,8 +976,7 @@ function initSplitters() {
       if (drag.axis === 'x') {
         // Keep the map square: its width is also its height, so the top-down
         // view never scales north and east differently.
-        const maxW = Math.max(200, row.clientWidth - 260);
-        mapW = mapH = Math.max(160, Math.min(maxW, drag.w0 + e.clientX - drag.x0));
+        mapWPref = drag.w0 + e.clientX - drag.x0;   // applyPanelSizes clamps
       } else {
         profH = Math.max(160, Math.min(1600, drag.h0 + e.clientY - drag.y0));
       }
@@ -983,7 +1001,7 @@ connect();
 initSplitters();
 refreshTerrain3dSec();
 refreshTrajSec();
-window.addEventListener('resize', () => { if (latestState) draw(latestState); });
+window.addEventListener('resize', applyPanelSizes);
 </script>
 </body>
 </html>

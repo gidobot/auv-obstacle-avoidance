@@ -950,6 +950,8 @@ def _build_client_html(ws_port: int) -> str:
         "<button onclick=\"ws.send(JSON.stringify({cmd:'reset'}))\">Reset</button>\n"
         "    <button onclick=\"exportTerrain()\" title=\"Export current terrain as OBJ mesh"
         " + height-coloured textured material + PNG heightmap for Blender/Gazebo\">Export Terrain</button>\n"
+        "    <button onclick=\"exportMission()\" title=\"Export the current survey as an"
+        " acfr-lcm mission XML, ready to run on the vehicle under the Gazebo SITL\">Export Mission</button>\n"
         "    <label title=\"Side length of exported terrain (m), centred on origin\">Export size\n"
         "      <input type=\"number\" id=\"exportSize\" value=\"500\" min=\"50\" max=\"2000\""
         " step=\"50\" style=\"width:64px\">m\n"

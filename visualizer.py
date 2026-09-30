@@ -301,6 +301,7 @@ HTML_CLIENT_3D = r"""<!DOCTYPE html>
     <button id="playBtn" onclick="togglePlay()">Play</button>
     <button onclick="ws.send(JSON.stringify({cmd:'reset'}))">Reset</button>
     <button onclick="exportTerrain()" title="Export current terrain as OBJ mesh + height-coloured textured material + PNG heightmap for Blender/Gazebo">Export Terrain</button>
+    <button onclick="exportMission()" title="Export the current survey as an acfr-lcm mission XML, ready to run on the vehicle under the Gazebo SITL">Export Mission</button>
     <label title="Side length of exported terrain (m), centred on origin">Export size
       <input type="number" id="exportSize" value="500" min="50" max="2000" step="50" style="width:64px">m
     </label>
@@ -393,6 +394,24 @@ function sendSensorToggle(key, enabled) {
 }
 
 // ---- Terrain export (OBJ mesh + MTL + height-coloured diffuse + heightmap) ----
+function exportMission() {
+  // Only the lawnmower trajectory has waypoints; arc and straight do not, and
+  // the server says so rather than emitting an empty mission.
+  const raw = prompt('Mission file name (.xml):', 'survey');
+  if (raw === null) return;
+  const name = raw.trim() || 'survey';
+  const alt = prompt('Survey altitude (m):', '2.0');
+  if (alt === null) return;
+  const spd = prompt('Survey speed (m/s):', '0.5');
+  if (spd === null) return;
+  const q = `?name=${encodeURIComponent(name)}&alt=${+alt||2}&speed=${+spd||0.5}`;
+  const a = document.createElement('a');
+  a.href = 'export/mission.xml' + q; a.download = '';
+  document.body.appendChild(a); a.click(); a.remove();
+  const st = document.getElementById('status');
+  if (st) st.textContent = `Exporting mission “${name}” (alt ${alt} m, ${spd} m/s)…`;
+}
+
 function exportTerrain() {
   const size = +document.getElementById('exportSize').value || 500;
   // Ask for the export name; all files share this stem (server sanitizes it).
@@ -1054,6 +1073,11 @@ class VisualizerServer3D:
         self.trajectory          = trajectory or StraightTrajectory3D(initial_heading_deg)
         self.initial_heading_deg = initial_heading_deg
         self.mission_path        = mission_path or []
+        # Survey geometry, when the trajectory is a lawnmower.  Kept so the
+        # mission export can emit exact corners instead of reverse-engineering
+        # them from the flown path, whose arcs overshoot whenever the turn
+        # radius exceeds the leg spacing.
+        self.survey              = None
         self.terrain_type        = terrain_type
         self.terrain_kwargs      = terrain_kwargs or {}
         self._map_nx, self._map_ny, self._map_dx, self._map_dy, \
@@ -1317,6 +1341,7 @@ class VisualizerServer3D:
         mission_hdg = heading_deg if (mhdg_raw is None or mhdg_raw == '') \
                       else float(mhdg_raw)
         mission_path: list = []
+        survey = None
         if traj_type == 'arc-left':
             traj = ArcTrajectory3D(heading_deg, radius=arc_radius, direction='left')
         elif traj_type == 'arc-right':
@@ -1324,13 +1349,14 @@ class VisualizerServer3D:
         elif traj_type == 'circle':
             traj = ArcTrajectory3D(heading_deg, radius=arc_radius, direction='left')
         elif traj_type == 'lawnmower':
+            survey = dict(leg_length=float(data.get('leg_length', 20.0)),
+                          spacing=float(data.get('spacing', 7.0)),
+                          n_legs=int(data.get('n_legs', 20)),
+                          orientation_deg=mission_hdg,
+                          start_x=0.0, start_y=0.0)
             traj, mission_path = make_lawnmower_trajectory(
-                leg_length=float(data.get('leg_length', 20.0)),
-                spacing=float(data.get('spacing', 7.0)),
-                n_legs=int(data.get('n_legs', 20)),
-                orientation_deg=mission_hdg,
                 turn_rate=float(data.get('turn_rate', 0.25)),
-                survey_speed=0.5,
+                survey_speed=0.5, **survey,
             )
         else:
             traj = StraightTrajectory3D(heading_deg)
@@ -1339,6 +1365,7 @@ class VisualizerServer3D:
         self.initial_heading_deg = heading_deg
         self.initial_depth       = float(data.get('initial_depth', 0.0))
         self.mission_path        = mission_path
+        self.survey              = survey if traj_type == 'lawnmower' else None
         self._map_nx, self._map_ny, self._map_dx, self._map_dy, \
             self._map_ox, self._map_oy = self._compute_map_extents(mission_path)
 
@@ -1462,6 +1489,118 @@ class VisualizerServer3D:
                     for p, q, r in tri])
 
         return '\n'.join(out).encode()
+
+    def _export_mission_xml(self, altitude: float = 2.0, speed: float = 0.5,
+                            descent_depth: float = 5.0, timeout_factor: float = 6.0,
+                            min_timeout: float = 240.0, min_leg_m: float = 2.0,
+                            name: str = 'mission') -> bytes:
+        """Emit the current survey as an acfr-lcm mission XML.
+
+        The simulator's mission_path is a dense polyline -- 151 points for a
+        three-leg lawnmower -- because it is drawn, not flown.  A mission
+        wants corners, so the path is simplified with Douglas-Peucker and one
+        goto is emitted per surviving vertex.  The vehicle makes its own turns,
+        so an arc collapses to the corner it rounds.
+
+        Frames line up already: the simulator and the vehicle both use nav
+        x = north, y = east, and both measure heading as atan2(east, north),
+        so 90 degrees is due east on each.  No transform, but worth stating
+        because it is the thing that would silently ruin an exported mission.
+
+        The preamble mirrors the hand-written missions: hold the surface,
+        descend in depth mode, then switch to altitude for the survey.  A
+        depth-mode descent is used rather than going straight to altitude
+        because the altimeter has nothing to track from the surface.
+        """
+        import math
+
+        pts = [(float(a), float(b)) for a, b in (self.mission_path or [])]
+        if len(pts) < 2:
+            raise ValueError("no mission path to export -- the trajectory must "
+                             "be 'lawnmower' (arc/straight have no waypoints)")
+
+        # Corners come from the survey parameters, not from the flown path.
+        #
+        # Reverse-engineering them from the path does not work: the simulator
+        # rounds each turn with an arc of radius survey_speed/turn_rate, and
+        # when that exceeds the leg spacing -- 2 m against 1.5 m at the
+        # defaults -- the path swings past the corner entirely, so there is no
+        # square corner in it to recover.  Fitting lines and intersecting them
+        # then produces waypoints tens of metres off the survey.
+        #
+        # The geometry is known exactly, so use it.  A boustrophedon from
+        # start, alternating along +/-u each leg and stepping across by v
+        # between them, gives the corners the arcs were rounding and nothing
+        # else.
+        sv = self.survey
+        if sv:
+            o = math.radians(float(sv['orientation_deg']))
+            ux, uy = math.cos(o), math.sin(o)          # along leg
+            vx, vy = -math.sin(o), math.cos(o)         # across, to port
+            L = float(sv['leg_length'])
+            sp = float(sv['spacing'])
+            n = int(sv['n_legs'])
+            cx, cy = float(sv.get('start_x', 0.0)), float(sv.get('start_y', 0.0))
+            wps = [(cx, cy)]
+            for k in range(n):
+                d = 1.0 if k % 2 == 0 else -1.0
+                cx, cy = cx + d * ux * L, cy + d * uy * L
+                wps.append((cx, cy))
+                if k < n - 1:
+                    cx, cy = cx + vx * sp, cy + vy * sp
+                    wps.append((cx, cy))
+        else:
+            # Not a lawnmower: no survey geometry to appeal to, so the path is
+            # all there is.  Straight and arc trajectories are start-to-finish.
+            wps = [pts[0], pts[-1]]
+
+        def bearing(a, b):
+            return math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 360.0
+
+        def leg(x, y, z, hdg, tmo, mode):
+            return (f"    <primitive>\n"
+                    f"        <goto>\n"
+                    f"            <position x=\"{x:.2f}\" y=\"{y:.2f}\" z=\"{z:.2f}\"/>\n"
+                    f"            <heading deg=\"{hdg:.2f}\" />\n"
+                    f"            <timeout t=\"{tmo:.2f}\" />\n"
+                    f"            <velocity x=\"{speed}\" />\n"
+                    f"            <depth mode=\"{mode}\" />\n"
+                    f"        </goto>\n"
+                    f"    </primitive>\n")
+
+        x0, y0 = wps[0]
+        h0 = bearing(wps[0], wps[1])
+        total = sum(math.hypot(b[0] - a[0], b[1] - a[1])
+                    for a, b in zip(wps, wps[1:]))
+
+        out = [
+            '<?xml version="1.0" standalone="no" ?>\n<mission>\n    <desc>\n',
+            f"        {name}\n\n",
+            f"        Exported from the obstacle-avoidance simulator.\n\n",
+            f"        {len(wps)} waypoints over {total:.1f} m of track: the legs\n"
+            f"        fitted to {len(pts)} path points, with each turn reduced to\n"
+            f"        the corner its arc was rounding rather than kept as arc\n"
+            f"        waypoints.\n"
+            f"        Survey altitude {altitude:.2f} m at {speed} m/s; descent to\n"
+            f"        {descent_depth:.2f} m in depth mode before altitude control\n"
+            f"        takes over, because the altimeter has nothing to track from\n"
+            f"        the surface.\n\n"
+            f"        Leg timeouts are {timeout_factor:.1f}x the nominal time at\n"
+            f"        {speed} m/s, floored at {min_timeout:.0f} s.  Generous on\n"
+            f"        purpose: an obstacle-avoiding vehicle stops to climb and to\n"
+            f"        correct in place, and a leg that ends on timeout rather than\n"
+            f"        on arrival truncates whatever it was measuring.\n",
+            "    </desc>\n\n",
+            leg(x0, y0, 0.0, h0, min_timeout, "depth"),
+            leg(x0, y0, descent_depth, h0, min_timeout, "depth"),
+            leg(x0, y0, altitude, h0, min_timeout, "altitude"),
+        ]
+        for a, b in zip(wps, wps[1:]):
+            d = math.hypot(b[0] - a[0], b[1] - a[1])
+            tmo = max(min_timeout, timeout_factor * d / max(speed, 1e-6))
+            out.append(leg(b[0], b[1], altitude, bearing(a, b), tmo, "altitude"))
+        out.append("</mission>\n")
+        return "".join(out).encode()
 
     @staticmethod
     def _export_terrain_mtl(name: str = 'terrain') -> bytes:
@@ -1710,6 +1849,15 @@ class VisualizerServer3D:
                             cx, cy, size_m, dx_m=fnum('step', 2.0), name=name)
                         self_._send(body, 'model/obj', f'{name}.obj')
                         return
+                    if path == '/export/mission.xml':
+                        body = server._export_mission_xml(
+                            altitude=fnum('alt', 2.0), speed=fnum('speed', 0.5),
+                            descent_depth=fnum('descent', 5.0),
+                            timeout_factor=fnum('tmo', 6.0),
+                            min_timeout=fnum('mintmo', 240.0),
+                            min_leg_m=fnum('minleg', 2.0), name=name)
+                        self_._send(body, 'application/xml', f'{name}.xml')
+                        return
                     if path == '/export/terrain.mtl':
                         self_._send(server._export_terrain_mtl(name),
                                     'model/mtl', f'{name}.mtl')
@@ -1855,6 +2003,7 @@ def main():
 
     # --- Trajectory ---
     mission_path: list = []
+    survey = None
     mission_hdg = args.mission_heading if args.mission_heading is not None else args.heading
     if args.trajectory == 'arc-left':
         traj = ArcTrajectory3D(args.heading, radius=args.arc_radius, direction='left')
@@ -1863,13 +2012,11 @@ def main():
     elif args.trajectory == 'circle':
         traj = ArcTrajectory3D(args.heading, radius=args.arc_radius, direction='left')
     elif args.trajectory == 'lawnmower':
+        survey = dict(leg_length=args.leg_length, spacing=args.spacing,
+                      n_legs=args.n_legs, orientation_deg=mission_hdg,
+                      start_x=0.0, start_y=0.0)
         traj, mission_path = make_lawnmower_trajectory(
-            leg_length=args.leg_length,
-            spacing=args.spacing,
-            n_legs=args.n_legs,
-            orientation_deg=mission_hdg,
-            turn_rate=args.turn_rate,
-            survey_speed=0.5,
+            turn_rate=args.turn_rate, survey_speed=0.5, **survey,
         )
     else:
         traj = StraightTrajectory3D(args.heading)
@@ -1883,6 +2030,7 @@ def main():
         initial_heading_deg=args.heading,
         mission_path=mission_path,
     )
+    server.survey = survey
     traj_desc = args.trajectory
     if args.trajectory == 'lawnmower':
         turn_desc = (f'  turn={args.turn_rate:.2f}rad/s'

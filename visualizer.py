@@ -1668,6 +1668,15 @@ class VisualizerServer3D:
         """Start HTTP (serving 3D HTML) and WebSocket servers."""
         server = self  # captured for export routes
 
+        # The client hardcodes ws://localhost:8081, so point it at the port
+        # actually in use.  Without this --ws-port silently did nothing useful:
+        # the socket moved, the page did not, and the browser dialled 8081
+        # where there was no longer a server.  The symptom is a page that
+        # loads and then does nothing at all -- blank panes, dead Play and
+        # Reset -- because every one of those needs the socket.
+        client_html = HTML_CLIENT_3D.replace(
+            'ws://localhost:8081', f'ws://localhost:{self.ws_port}').encode()
+
         class Handler(http.server.BaseHTTPRequestHandler):
             def _send(self_, body: bytes, content_type: str,
                       filename: str | None = None):
@@ -1726,7 +1735,7 @@ class VisualizerServer3D:
                     self_.wfile.write(msg)
                     return
 
-                self_._send(HTML_CLIENT_3D.encode(), 'text/html')
+                self_._send(client_html, 'text/html')
 
             def log_message(self_, format, *args):
                 pass

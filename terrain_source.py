@@ -261,10 +261,9 @@ def _main(argv=None):
     if a.ideal:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from ideal_trajectory import analytic_ideal
-        try:
-            from occupancy_map_cpp import OccupancyMapConfig
-        except ImportError:
-            from occupancy_map import OccupancyMapConfig
+        # occupancy_map.py was retired in 577d6c2; the C++ core is the only
+        # implementation, so there is nothing to fall back to.
+        from occupancy_map_cpp import OccupancyMapConfig
         cfg = OccupancyMapConfig()
         res = analytic_ideal(fn, 0.0, L, cfg)
         print()

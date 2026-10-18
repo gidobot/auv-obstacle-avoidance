@@ -219,9 +219,9 @@ function connect() {
 // ---------------------------------------------------------------------------
 function buildZGrid(tm) {
   const rows = [];
-  for (let iy = 0; iy < tm.ny; iy++) {
+  for (let ix = 0; ix < tm.nx; ix++) {       // row index = north = Plotly y
     const row = [];
-    for (let ix = 0; ix < tm.nx; ix++) {
+    for (let iy = 0; iy < tm.ny; iy++) {     // column index = east = Plotly x
       const v = tm.data[iy * tm.nx + ix];
       row.push(v === null ? null : -v);
     }
@@ -237,7 +237,7 @@ function surfaceTrace(tm) {
   const xArr = Array.from({length: tm.nx}, (_, i) => tm.ox + (i + 0.5) * tm.dx);
   const yArr = Array.from({length: tm.ny}, (_, i) => tm.oy + (i + 0.5) * tm.dy);
   return {
-    type: 'surface', x: xArr, y: yArr, z: buildZGrid(tm),
+    type: 'surface', x: yArr, y: xArr, z: buildZGrid(tm),
     colorscale: 'Viridis', reversescale: false,
     cmin: -tm.maxZ, cmax: -tm.minZ,
     showscale: true,
@@ -255,14 +255,14 @@ function surfaceTrace(tm) {
     lighting:      { ambient: 0.7, diffuse: 0.6, roughness: 0.5, specular: 0.05 },
     lightposition: { x: 1, y: 0, z: 2 },
     name: 'Seafloor',
-    hovertemplate: 'N %{x:.1f} m  E %{y:.1f} m<br>Depth: %{customdata:.1f} m<extra></extra>',
+    hovertemplate: 'N %{y:.1f} m  E %{x:.1f} m<br>Depth: %{customdata:.1f} m<extra></extra>',
     customdata: buildZGrid(tm).map(r => r.map(v => v === null ? null : -v)),
   };
 }
 function trailTrace() {
   return {
     type: 'scatter3d', mode: 'lines',
-    x: trail.map(p=>p[0]), y: trail.map(p=>p[1]), z: trail.map(p=>p[2]),
+    x: trail.map(p=>p[1]), y: trail.map(p=>p[0]), z: trail.map(p=>p[2]),
     line: { color: 'rgba(255,255,255,0.45)', width: 2 },
     hoverinfo: 'skip', showlegend: false, name: 'Trail',
   };
@@ -271,7 +271,7 @@ function vehicleTrace() {
   const p = trail.length ? trail[trail.length-1] : [0,0,0];
   return {
     type: 'scatter3d', mode: 'markers',
-    x: [p[0]], y: [p[1]], z: [p[2]],
+    x: [p[1]], y: [p[0]], z: [p[2]],
     marker: { color: '#F0997B', size: 7, line: { color: '#D85A30', width: 1.5 } },
     showlegend: false, name: 'AUV',
   };
@@ -296,15 +296,15 @@ function rayCoords(hits) {
   if (!p) return { x, y, z };
   for (const h of hits) {
     if (!hasDepth(h)) continue;
-    x.push(p[0], h[0], null);
-    y.push(p[1], h[1], null);
+    x.push(p[1], h[1], null);     // east
+    y.push(p[0], h[0], null);     // north
     z.push(p[2], -h[2], null);
   }
   return { x, y, z };
 }
 function hitCoords(hits) {
   const valid = hits.filter(hasDepth);
-  return { x: valid.map(h => h[0]), y: valid.map(h => h[1]),
+  return { x: valid.map(h => h[1]), y: valid.map(h => h[0]),
            z: valid.map(h => -h[2]) };
 }
 function dvlRayTrace() {
@@ -317,7 +317,7 @@ function dvlHitTrace() {
   const c = hitCoords(dvlHits);
   return { type: 'scatter3d', mode: 'markers', x: c.x, y: c.y, z: c.z,
            marker: { color: 'rgba(150,255,130,0.95)', size: 4 },
-           hovertemplate: 'DVL  N %{x:.1f}  E %{y:.1f}<extra></extra>',
+           hovertemplate: 'DVL  N %{y:.1f}  E %{x:.1f}<extra></extra>',
            showlegend: false, name: 'DVL returns' };
 }
 function sonarRayTrace() {
@@ -330,7 +330,7 @@ function sonarHitTrace() {
   const c = hitCoords(sonarHit ? [sonarHit] : []);
   return { type: 'scatter3d', mode: 'markers', x: c.x, y: c.y, z: c.z,
            marker: { color: 'rgba(120,190,255,0.95)', size: 5 },
-           hovertemplate: 'Sonar  N %{x:.1f}  E %{y:.1f}<extra></extra>',
+           hovertemplate: 'Sonar  N %{y:.1f}  E %{x:.1f}<extra></extra>',
            showlegend: false, name: 'Sonar return' };
 }
 // The altimeter gets its own colour and a bigger marker because it is the only
@@ -379,8 +379,8 @@ function observedCellsTrace() {
       for (let ix = 0; ix < tm.nx; ix++) {
         const v = tm.data[iy * tm.nx + ix];
         if (v === null) continue;
-        x.push(tm.ox + (ix + 0.5) * tm.dx);
-        y.push(tm.oy + (iy + 0.5) * tm.dy);
+        x.push(tm.oy + (iy + 0.5) * tm.dy);   // east
+        y.push(tm.ox + (ix + 0.5) * tm.dx);   // north
         z.push(-v);
         c.push(-v);
       }
@@ -391,7 +391,7 @@ function observedCellsTrace() {
     marker: { size: 2.5, color: c, colorscale: 'Viridis', showscale: false,
               cmin: tm ? -tm.maxZ : -1, cmax: tm ? -tm.minZ : 0 },
     customdata: c.map(v => -v),
-    hovertemplate: 'N %{x:.1f}  E %{y:.1f}<br>Depth %{customdata:.2f} m<extra></extra>',
+    hovertemplate: 'N %{y:.1f}  E %{x:.1f}<br>Depth %{customdata:.2f} m<extra></extra>',
     showlegend: false, name: 'Observed cells',
   };
 }
@@ -404,13 +404,13 @@ function makeLayout(tm) {
     paper_bgcolor: '#111', plot_bgcolor: '#111',
     font:   { color: '#ccc', family: "'Menlo','Consolas',monospace" },
     margin: { l: 0, r: 80, t: 36, b: 0 },
-    title:  { text: 'Seafloor Terrain — north right, east up, as the top-down view',
+    title:  { text: 'Seafloor Terrain — north up, east right, as the top-down view',
               font: { color: '#666', size: 12 }, x: 0.46 },
     scene: {
       bgcolor: '#0b1622',
-      xaxis: { title: 'North (m)', color: '#555', gridcolor: '#1d2d3d',
+      xaxis: { title: 'East (m)',  color: '#555', gridcolor: '#1d2d3d',
                zerolinecolor: '#2a3a4a', showspikes: false },
-      yaxis: { title: 'East (m)',  color: '#555', gridcolor: '#1d2d3d',
+      yaxis: { title: 'North (m)', color: '#555', gridcolor: '#1d2d3d',
                zerolinecolor: '#2a3a4a', showspikes: false },
       zaxis: {
         title: 'Depth (m)', color: '#555', gridcolor: '#1d2d3d',
@@ -427,16 +427,21 @@ function makeLayout(tm) {
         const Lx = tm.nx * tm.dx;          // North extent (m)
         const Ly = tm.ny * tm.dy;          // East extent (m)
         const base = Math.max(Lx, Ly);     // normalise to larger dimension
-        return { x: Lx / base, y: Ly / base, z: 0.35 };
+        return { x: Ly / base, y: Lx / base, z: 0.35 };   // x is east, y is north
       })(),
       // Open oriented like the top-down view so the two can be read against
-      // each other: north to the right, east up the screen.  up = +y makes
-      // east the screen vertical, and an eye that is mostly +z looks down the
-      // way the 2-D map does, with just enough offset left in to show relief.
-      // Both views index the same raster the same way (data[iy*nx + ix], x
-      // north, y east); only the presentation differed, so this is the whole
-      // of the correspondence.  Drag still rotates it freely.
-      camera: { eye: { x: 0.15, y: -0.15, z: 2.0 }, up: { x: 0, y: 1, z: 0 } },
+      // each other: east to the right, north up the screen, which is what
+      // Gazebo shows too.  Plotly x is east and y is north here, so up = +y
+      // puts north up the screen and an eye that is mostly +z then looks down
+      // with east to the right, with just enough offset left in to show
+      // relief.  Drag still rotates it freely.
+      //
+      // The axis assignment carries this, not the camera.  (north, east, up)
+      // is left-handed -- north x east is *down* -- so plotting north on x and
+      // east on y mirrors the scene, and no camera looking from above can undo
+      // that: a starboard turn renders anticlockwise.  Hence x = east, y =
+      // north, with buildZGrid transposed to match (Plotly reads z[y][x]).
+      camera: { eye: { x: -0.15, y: 0.15, z: 2.0 }, up: { x: 0, y: 1, z: 0 } },
     },
   };
 }
@@ -475,10 +480,10 @@ function applyTerrainRestyle() {
 }
 function applyVehicleRestyle() {
   Plotly.restyle('plot', {
-    x: [trail.map(p=>p[0])], y: [trail.map(p=>p[1])], z: [trail.map(p=>p[2])],
+    x: [trail.map(p=>p[1])], y: [trail.map(p=>p[0])], z: [trail.map(p=>p[2])],
   }, [T_TRAIL]);
   const p = trail[trail.length-1];
-  Plotly.restyle('plot', { x: [[p[0]]], y: [[p[1]]], z: [[p[2]]] }, [T_VEHICLE]);
+  Plotly.restyle('plot', { x: [[p[1]]], y: [[p[0]]], z: [[p[2]]] }, [T_VEHICLE]);
 
   const dRay = rayCoords(dvlHits),  dHit = hitCoords(dvlHits);
   const sRay = rayCoords(sonarHit ? [sonarHit] : []);
@@ -892,10 +897,10 @@ def _build_client_html(ws_port: int) -> str:
         "  // Draw terrain background sliced to the centred window\n"
         "  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, mapW, mapH);\n"
         "  if (terrainImageData) {\n"
-        "    const srcX = (viewOx - ox) / worldW * mapW;\n"
-        "    const srcY = (1 - (viewOy + viewSize - oy) / worldH) * mapH;\n"
-        "    const srcW = viewSize / worldW * mapW;\n"
-        "    const srcH = viewSize / worldH * mapH;\n"
+        "    const srcX = (viewOy - oy) / worldH * mapW;\n"
+        "    const srcY = (1 - (viewOx + viewSize - ox) / worldW) * mapH;\n"
+        "    const srcW = viewSize / worldH * mapW;\n"
+        "    const srcH = viewSize / worldW * mapH;\n"
         "    ctx.drawImage(terrainImageData, srcX, srcY, srcW, srcH, 0, 0, mapW, mapH);\n"
         "  }\n",
         "vehicle-centred top-down window")
@@ -906,32 +911,32 @@ def _build_client_html(ws_port: int) -> str:
     # right" the patch stopped matching while the grid-line patch below kept
     # matching, which is exactly the half-patched page _patch now refuses.
     h = _patch(h,
-        "      (wx - ox) / worldW * mapW,\n",
-        "      (wx - viewOx) / viewSize * mapW,\n",
-        "toPixel north coordinate")
+        "      (wy - oy) / worldH * mapW,\n",
+        "      (wy - viewOy) / viewSize * mapW,\n",
+        "toPixel east coordinate (screen x)")
     h = _patch(h,
-        "      (1 - (wy - oy) / worldH) * mapH,",
-        "      (1 - (wy - viewOy) / viewSize) * mapH,",
-        "toPixel east coordinate")
+        "      (1 - (wx - ox) / worldW) * mapH,",
+        "      (1 - (wx - viewOx) / viewSize) * mapH,",
+        "toPixel north coordinate (screen y)")
 
     # Grid-line loop bounds follow the centred window
     h = _patch(h,
         "  const gx0 = Math.ceil(ox / 20) * 20;\n"
         "  for (let gx = gx0; gx <= ox + worldW; gx += 20) {\n"
-        "    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
+        "    const [, py] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
         "  }\n"
         "  const gy0 = Math.ceil(oy / 20) * 20;\n"
         "  for (let gy = gy0; gy <= oy + worldH; gy += 20) {\n"
-        "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
+        "    const [px] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
         "  }",
 
         "  const gx0 = Math.ceil(viewOx / 20) * 20;\n"
         "  for (let gx = gx0; gx <= viewOx + viewSize; gx += 20) {\n"
-        "    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
+        "    const [, py] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
         "  }\n"
         "  const gy0 = Math.ceil(viewOy / 20) * 20;\n"
         "  for (let gy = gy0; gy <= viewOy + viewSize; gy += 20) {\n"
-        "    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();\n"
+        "    const [px] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();\n"
         "  }",
         "grid-line bounds")
 

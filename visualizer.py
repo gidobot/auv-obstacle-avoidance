@@ -475,8 +475,8 @@ function renderTerrainMap() {
   for (let py = 0; py < mapH; py++) {
     for (let px = 0; px < mapW; px++) {
       // Map pixel -> world (x, y)
-      const wx = ox + (px / mapW) * (nx * dx);
-      const wy = oy + (1 - py / mapH) * (ny * dy);  // second axis (east) up the screen
+      const wy = oy + (px / mapW) * (ny * dy);      // east across the screen
+      const wx = ox + (1 - py / mapH) * (nx * dx);  // north up the screen
       // Bilinear sample
       const ix = Math.floor((wx - ox) / dx);
       const iy = Math.floor((wy - oy) / dy);
@@ -515,8 +515,8 @@ function drawTopDown(s) {
   // World → pixel
   function toPixel(wx, wy) {
     return [
-      (wx - ox) / worldW * mapW,
-      (1 - (wy - oy) / worldH) * mapH,   // east up, north right
+      (wy - oy) / worldH * mapW,
+      (1 - (wx - ox) / worldW) * mapH,   // north up, east right (ENU, as Gazebo shows)
     ];
   }
 
@@ -524,11 +524,11 @@ function drawTopDown(s) {
   ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 0.5;
   const gx0 = Math.ceil(ox / 20) * 20;
   for (let gx = gx0; gx <= ox + worldW; gx += 20) {
-    const [px] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();
+    const [, py] = toPixel(gx, 0); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();
   }
   const gy0 = Math.ceil(oy / 20) * 20;
   for (let gy = gy0; gy <= oy + worldH; gy += 20) {
-    const [, py] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(mapW, py); ctx.stroke();
+    const [px] = toPixel(0, gy); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, mapH); ctx.stroke();
   }
 
   // Mission path (planned lawnmower track) — use cached global from terrain_map msg
@@ -569,8 +569,8 @@ function drawTopDown(s) {
   const [vpx, vpy] = toPixel(vwx, s.vehicle_y);
   const hLen = 24;
   const heading = s.vehicle_heading || 0;
-  const dxH =  Math.cos(heading) * hLen;
-  const dyH = -Math.sin(heading) * hLen;   // screen y is inverted
+  const dxH =  Math.sin(heading) * hLen;   // east component -> screen x
+  const dyH = -Math.cos(heading) * hLen;   // north component -> screen y (inverted)
   ctx.strokeStyle = 'rgba(100,220,255,0.7)'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
   ctx.beginPath(); ctx.moveTo(vpx, vpy); ctx.lineTo(vpx + dxH, vpy + dyH); ctx.stroke();
   ctx.setLineDash([]);

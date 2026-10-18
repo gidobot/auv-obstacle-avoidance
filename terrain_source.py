@@ -121,6 +121,57 @@ def from_grid(depth_grid, north0, east0, cell, name="grid") -> TerrainField:
     return TerrainField(depth_grid, north0, east0, cell, name)
 
 
+def _load_dae(path):
+    """Vertices and triangles from a COLLADA file, tolerating broken refs.
+
+    Survey exporters routinely emit references that do not resolve -- the
+    Tofua export instances material "#metarial-0" against a library that
+    defines "material-0".  pycollada raises on those by default and trimesh
+    swallows the exception into an empty Scene, so a 200 MB mesh silently
+    loads as no geometry.  Ignoring the reference errors keeps the geometry,
+    which is all a depth grid needs.
+    """
+    import collada
+    from collada.common import DaeBrokenRefError, DaeUnsupportedError
+
+    doc = collada.Collada(path, ignore=[DaeBrokenRefError, DaeUnsupportedError])
+    vs, fs, off = [], [], 0
+    for geom in doc.geometries:
+        for prim in geom.primitives:
+            v = np.asarray(prim.vertex, dtype=float)
+            idx = np.asarray(prim.vertex_index, dtype=int)
+            if v.size == 0 or idx.size == 0 or idx.ndim != 2:
+                continue
+            if idx.shape[1] == 3:
+                tri = idx
+            elif idx.shape[1] == 4:                 # polylist of quads
+                tri = np.vstack([idx[:, [0, 1, 2]], idx[:, [0, 2, 3]]])
+            else:
+                continue
+            vs.append(v)
+            fs.append(tri + off)
+            off += len(v)
+    if not vs:
+        raise ValueError(f"{path}: no triangles in any geometry")
+    return np.vstack(vs), np.vstack(fs)
+
+
+def _load_mesh(path):
+    """(vertices, faces) from any mesh trimesh reads, with a COLLADA fallback."""
+    try:
+        import trimesh
+        loaded = trimesh.load(path, force="mesh")
+        verts = np.asarray(getattr(loaded, "vertices", ()), dtype=float)
+        faces = np.asarray(getattr(loaded, "faces", ()), dtype=int)
+    except Exception:
+        verts = faces = np.empty(0)
+    if verts.size and faces.size:
+        return verts, faces
+    if os.path.splitext(path)[1].lower() == ".dae":
+        return _load_dae(path)
+    raise ValueError(f"{path}: no geometry")
+
+
 def from_mesh(path: str,
               cell: float = 0.25,
               north_axis: str = "y",
@@ -146,13 +197,7 @@ def from_mesh(path: str,
     re-triangulating, so the sampled surface is the reconstructed surface and
     holes stay holes (NaN) instead of being bridged.
     """
-    import trimesh
-
-    scene_or_mesh = trimesh.load(path, force="mesh")
-    verts = np.asarray(scene_or_mesh.vertices, dtype=float)
-    faces = np.asarray(scene_or_mesh.faces, dtype=int)
-    if verts.size == 0 or faces.size == 0:
-        raise ValueError(f"{path}: no geometry")
+    verts, faces = _load_mesh(path)
 
     def axis(spec):
         sign = -1.0 if spec.startswith("-") else 1.0

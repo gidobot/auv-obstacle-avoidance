@@ -879,7 +879,7 @@ def _build_client_html(ws_port: int) -> str:
     # terrain-origin coordinate system with a vehicle-centred window.
     h = _patch(h,
         "  // Draw terrain background\n"
-        "  if (terrainImageData) ctx.drawImage(terrainImageData, 0, 0);\n"
+        "  if (terrainImageData) ctx.drawImage(terrainImageData, 0, 0, mapW, mapH);\n"
         "\n"
         "  const { nx, ny, ox, oy, dx, dy } = terrainMap;\n"
         "  const worldW = nx * dx, worldH = ny * dy;\n",
@@ -887,20 +887,27 @@ def _build_client_html(ws_port: int) -> str:
         "  const { nx, ny, ox, oy, dx, dy } = terrainMap;\n"
         "  const worldW = nx * dx, worldH = ny * dy;\n"
         "\n"
-        "  // Vehicle-centred view: show ±viewHalf metres around the vehicle\n"
-        "  const viewHalf = 60;\n"
+        "  // Vehicle-centred view, but never larger than the raster and never\n"
+        "  // off it.  The live raster is sized to the mission plus a small\n"
+        "  // margin -- a 25 m-wide survey gives about 55 m of north -- so a\n"
+        "  // fixed 120 m window left most of the pane outside the map, which\n"
+        "  // reads as no terrain even while cells are arriving.\n"
         "  const vwxC = (s.vehicle_wx !== undefined) ? s.vehicle_wx : s.vehicle_x;\n"
         "  const vyC  = s.vehicle_y || 0;\n"
-        "  const viewOx = vwxC - viewHalf, viewOy = vyC - viewHalf;\n"
-        "  const viewSize = viewHalf * 2;\n"
+        "  const viewSize = Math.min(120, worldW, worldH);\n"
+        "  const clampTo = (v, lo, hi) => Math.min(Math.max(v, lo), hi);\n"
+        "  const viewOx = clampTo(vwxC - viewSize / 2, ox, ox + worldW - viewSize);\n"
+        "  const viewOy = clampTo(vyC  - viewSize / 2, oy, oy + worldH - viewSize);\n"
         "\n"
         "  // Draw terrain background sliced to the centred window\n"
         "  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, mapW, mapH);\n"
         "  if (terrainImageData) {\n"
-        "    const srcX = (viewOy - oy) / worldH * mapW;\n"
-        "    const srcY = (1 - (viewOx + viewSize - ox) / worldW) * mapH;\n"
-        "    const srcW = viewSize / worldH * mapW;\n"
-        "    const srcH = viewSize / worldW * mapH;\n"
+        "    // src is in image pixels, and the image is now one pixel per\n"
+        "    // cell, so these scale by ny/nx rather than the pane size.\n"
+        "    const srcX = (viewOy - oy) / worldH * ny;\n"
+        "    const srcY = (1 - (viewOx + viewSize - ox) / worldW) * nx;\n"
+        "    const srcW = viewSize / worldH * ny;\n"
+        "    const srcH = viewSize / worldW * nx;\n"
         "    ctx.drawImage(terrainImageData, srcX, srcY, srcW, srcH, 0, 0, mapW, mapH);\n"
         "  }\n",
         "vehicle-centred top-down window")
@@ -942,9 +949,9 @@ def _build_client_html(ws_port: int) -> str:
 
     # Render unexplored (null) height map cells as dark grey
     h = _patch(h,
-        "      const z = data[ic];\n"
+        "      const z = data[col * nx + inorth];         // data[iEast * nx + iNorth]\n"
         "      const [r, g, b] = depthToRgb(z, minZ, maxZ);",
-        "      const z = data[ic];\n"
+        "      const z = data[col * nx + inorth];         // data[iEast * nx + iNorth]\n"
         "      let r, g, b;\n"
         "      if (z == null) { r = g = b = 35; }\n"
         "      else { [r, g, b] = depthToRgb(z, minZ, maxZ); }",

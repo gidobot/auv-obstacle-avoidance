@@ -466,24 +466,27 @@ function depthToRgb(z, minZ, maxZ) {
 
 function renderTerrainMap() {
   if (!terrainMap) return;
-  const offCanvas = document.createElement('canvas');
-  offCanvas.width = mapW; offCanvas.height = mapH;
-  const offCtx = offCanvas.getContext('2d');
-  const img = offCtx.createImageData(mapW, mapH);
   const { data, nx, ny, ox, oy, dx, dy, minZ, maxZ } = terrainMap;
 
-  for (let py = 0; py < mapH; py++) {
-    for (let px = 0; px < mapW; px++) {
-      // Map pixel -> world (x, y)
-      const wy = oy + (px / mapW) * (ny * dy);      // east across the screen
-      const wx = ox + (1 - py / mapH) * (nx * dx);  // north up the screen
-      // Bilinear sample
-      const ix = Math.floor((wx - ox) / dx);
-      const iy = Math.floor((wy - oy) / dy);
-      const ic = Math.max(0, Math.min(nx - 1, ix)) + Math.max(0, Math.min(ny - 1, iy)) * nx;
-      const z = data[ic];
+  // One image pixel per grid cell, NOT one per pane pixel.  The pane is
+  // drag-resizable, and sampling at pane resolution subsamples the grid as
+  // soon as the pane is narrower than the raster: cells fall between sample
+  // points and are dropped.  A sparse map vanishes completely that way -- at
+  // a few per cent coverage, narrowing the pane erased the whole height map
+  // and widening it brought it back.  Rasterising at grid resolution makes
+  // the image independent of the pane; drawImage does the scaling, and no
+  // cell can be skipped.
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = ny; offCanvas.height = nx;   // x = east cells, y = north cells
+  const offCtx = offCanvas.getContext('2d');
+  const img = offCtx.createImageData(ny, nx);
+
+  for (let row = 0; row < nx; row++) {
+    const inorth = nx - 1 - row;                 // row 0 is north max (north up)
+    for (let col = 0; col < ny; col++) {
+      const z = data[col * nx + inorth];         // data[iEast * nx + iNorth]
       const [r, g, b] = depthToRgb(z, minZ, maxZ);
-      const pi = (py * mapW + px) * 4;
+      const pi = (row * ny + col) * 4;
       img.data[pi]   = r;
       img.data[pi+1] = g;
       img.data[pi+2] = b;
@@ -507,7 +510,7 @@ function drawTopDown(s) {
   }
 
   // Draw terrain background
-  if (terrainImageData) ctx.drawImage(terrainImageData, 0, 0);
+  if (terrainImageData) ctx.drawImage(terrainImageData, 0, 0, mapW, mapH);
 
   const { nx, ny, ox, oy, dx, dy } = terrainMap;
   const worldW = nx * dx, worldH = ny * dy;

@@ -1,14 +1,19 @@
 """Mode transition graph for the no-livelock argument.
 
-The relation drawn here was enumerated exhaustively from the deployed
-selection (cpp/src/occupancy_map.cpp: set_mode_from_cmd_depth, the Step 2c
-latch override and the Step 3 tail hook) over previous mode, vertical error,
-latch state and tail state, and over 56 threshold/hysteresis pairs: 24 of the
-25 ordered pairs occur, the branch taken when both zero-surge predicates hold
-is dead, and the single absent edge is OBSTACLE_CLEAR -> ALT_CORRECTION.
+The relation was enumerated exhaustively from the deployed selection
+(cpp/src/occupancy_map.cpp: set_mode_from_cmd_depth, the Step 2c latch
+override and the Step 3 tail hook) over previous mode, vertical error, latch
+state and tail state, and over 56 threshold/hysteresis pairs: 24 of the 25
+ordered pairs occur, the branch taken when both zero-surge predicates hold is
+dead, and the single absent edge is OBSTACLE_CLEAR -> ALT_CORRECTION.
 
-Node boxes are sized from the rendered text rather than from guessed widths,
-so the labels cannot overflow them.
+Visual structure follows docs/traversing-the-cliff-manifold.html: only the two
+states the proof is about are boxed, the zero-progress region is an outline
+rather than a fill, the terminal state is dashed, and latch-mediated edges
+carry their own colour. Laid out for a single column, so the proportions and
+type sizes differ from the web original.
+
+Node boxes are sized from the rendered text, so labels cannot overflow them.
 
     python3 make_modegraph_fig.py
 """
@@ -20,101 +25,125 @@ from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 OUT = ("/home/gidobot/workspace/acfr/auv-obstacle-avoidance/docs/paper/"
        "6aa364bd4d6d76d5dae0d68b/figures/modegraph")
 
-C_COMMAND = "#eb6834"
-INK, INK2, GRID_INK, BASE_INK = "#0b0b0b", "#52514e", "#c9c8c3", "#9a9892"
-BAND_GO, BAND_STOP = "#eef2f7", "#f6ece6"
-FS_NODE, FS_EDGE, FS_NOTE = 5.4, 4.9, 4.6
+INK, MUTED, RULE, SURF2 = "#0b0b0b", "#52514e", "#b8c7d0", "#eef2f7"
+ABSENT, LATCH = "#eb6834", "#2a78d6"
+FS_NODE, FS_SUB, FS_EDGE, FS_REG = 5.3, 4.3, 4.7, 4.5
+MONO = {"family": "monospace"}
+SANS = {"family": "sans-serif"}
 
 plt.rcParams.update({
     "font.family": "serif", "font.serif": ["DejaVu Serif"],
+    "font.monospace": ["DejaVu Sans Mono"], "font.sans-serif": ["DejaVu Sans"],
     "mathtext.fontset": "dejavuserif", "font.size": 7,
 })
 
 fig, ax = plt.subplots(figsize=(3.45, 2.3))
 ax.set_xlim(0, 10)
-ax.set_ylim(0.0, 6.9)
+ax.set_ylim(0, 7.4)
 ax.axis("off")
 
-PADX, PADY = 0.28, 0.20
 boxes = {}
+PADX, PADY = 0.30, 0.0
 
 
-def node(cx, cy, name, key=None):
-    """Place the label, measure it, then fit a box around it."""
-    t = ax.text(cx, cy, name, fontsize=FS_NODE, color=INK, ha="center",
-                va="center", zorder=4)
+def width_of(txt, fs, font):
+    t = ax.text(0, -99, txt, fontsize=fs, **font)
     fig.canvas.draw()
-    bb = t.get_window_extent().transformed(ax.transData.inverted())
-    x0, x1 = bb.x0 - PADX, bb.x1 + PADX
-    y0, y1 = bb.y0 - PADY, bb.y1 + PADY
+    w = t.get_window_extent().transformed(ax.transData.inverted()).width
+    t.remove()
+    return w
+
+
+def node(cx, name, sub, y0, y1, dashed=False):
+    """Box sized from the identifier; the gloss sits below it, unboxed."""
+    half = 0.5 * width_of(name, FS_NODE, MONO)
+    x0, x1 = cx - half - PADX, cx + half + PADX
     ax.add_patch(FancyBboxPatch((x0, y0), x1 - x0, y1 - y0,
                                 boxstyle="round,pad=0,rounding_size=0.10",
-                                facecolor="white", edgecolor=INK, lw=0.6,
+                                facecolor="none" if dashed else "white",
+                                edgecolor=INK, lw=0.6,
+                                linestyle=(0, (2.2, 1.8)) if dashed else "-",
                                 zorder=3))
-    boxes[key or name] = (x0, x1, y0, y1)
+    ax.text(cx, 0.5 * (y0 + y1), name, fontsize=FS_NODE, color=INK,
+            ha="center", va="center", zorder=4, **MONO)
+    ax.text(cx, y0 - 0.25, sub, fontsize=FS_SUB, color=MUTED, ha="center",
+            va="center", zorder=4, **SANS)
+    boxes[name] = (x0, x1, y0, y1)
 
 
-def band(y0, y1, fc, label, x0=0.1, x1=9.9):
-    ax.add_patch(FancyBboxPatch((x0, y0), x1 - x0, y1 - y0,
-                                boxstyle="round,pad=0,rounding_size=0.16",
-                                facecolor=fc, edgecolor=GRID_INK, lw=0.5,
-                                zorder=0))
-    ax.text(x0 + 0.16, y1 - 0.16, label, fontsize=FS_EDGE, color=INK2,
-            va="top", ha="left", zorder=1)
-
-
-def arrow(p0, p1, color=INK2, ls="-", lw=0.7, rad=0.0):
+def arrow(p0, p1, color=MUTED, ls="-", lw=0.7):
     ax.add_patch(FancyArrowPatch(p0, p1, arrowstyle="-|>", mutation_scale=5.0,
                                  lw=lw, color=color, linestyle=ls, shrinkA=0,
-                                 shrinkB=0,
-                                 connectionstyle="arc3,rad=%g" % rad,
-                                 zorder=5))
+                                 shrinkB=0, zorder=5))
 
 
-band(5.05, 6.85, BAND_GO, r"forward progress   $v_x = v_s$")
-node(1.85, 5.80, "ALT_FOLLOW")
-node(5.00, 5.80, "OBSTACLE_HOLD")
-node(8.15, 5.80, "TAIL_CLEAR")
+RX0, RX1 = 0.15, 9.85
 
-band(1.70, 4.15, BAND_STOP, r"zero progress   $v_x = 0$")
-node(2.10, 3.05, "ALT_CORRECTION")
-node(7.50, 3.05, "OBSTACLE_CLEAR")
-ax.text(2.10, 2.32, "bounded target", fontsize=FS_NOTE, color=INK2,
-        ha="center", va="center", style="italic", zorder=4)
-ax.text(7.50, 2.32, "monotone target", fontsize=FS_NOTE, color=INK2,
-        ha="center", va="center", style="italic", zorder=4)
+# forward-progress region: a region, not a set of objects -- bare labels
+ax.add_patch(FancyBboxPatch((RX0, 5.30), RX1 - RX0, 1.65,
+                            boxstyle="round,pad=0,rounding_size=0.14",
+                            facecolor=SURF2, edgecolor=RULE, lw=0.5, zorder=0))
+ax.text(RX0 + 0.20, 6.70, "FORWARD PROGRESS  ·  $v_x = v_s$", fontsize=FS_REG,
+        color=MUTED, ha="left", va="center", zorder=1, **MONO)
+for cx, nm in ((2.05, "ALT_FOLLOW"), (5.00, "OBSTACLE_HOLD"),
+               (7.95, "TAIL_CLEAR")):
+    ax.text(cx, 5.85, nm, fontsize=FS_NODE, color=INK, ha="center",
+            va="center", zorder=2, **MONO)
 
-ac, oc = boxes["ALT_CORRECTION"], boxes["OBSTACLE_CLEAR"]
+# zero-progress region: outlined in the accent, so the eye lands on it
+ax.add_patch(FancyBboxPatch((RX0, 0.95), RX1 - RX0, 3.15,
+                            boxstyle="round,pad=0,rounding_size=0.14",
+                            facecolor="none", edgecolor=ABSENT, lw=0.6,
+                            linestyle=(0, (3.0, 2.4)), alpha=0.7, zorder=0))
+ax.text(RX0 + 0.20, 1.18, "ZERO PROGRESS  ·  $v_x = 0$", fontsize=FS_REG,
+        color=ABSENT, ha="left", va="center", zorder=1, **MONO)
+
+node(2.20, "ALT_CORRECTION", "descends · target bounded", 2.95, 3.85)
+node(5.60, "OBSTACLE_CLEAR", "ascends · target monotone", 2.95, 3.85)
+node(8.60, "SURFACE HOLD", "target unreachable", 2.95, 3.85, dashed=True)
+
+ac, oc, sh = (boxes["ALT_CORRECTION"], boxes["OBSTACLE_CLEAR"],
+              boxes["SURFACE HOLD"])
 mid = 0.5 * (ac[1] + oc[0])
 
 # the single edge of the induced subgraph, and the one that is absent
-arrow((ac[1], 3.22), (oc[0], 3.22), lw=0.8)
-ax.text(mid, 3.38, r"$\Delta z \leq -T$", fontsize=FS_EDGE, color=INK2,
-        ha="center", va="bottom")
-arrow((oc[0], 2.84), (ac[1], 2.84), color=C_COMMAND, ls=(0, (2.0, 1.3)),
-      lw=0.8)
-ax.plot([mid], [2.84], marker="x", ms=3.8, mew=1.0, color=C_COMMAND, zorder=6)
-ax.text(mid, 2.62, "absent", fontsize=FS_EDGE, color=C_COMMAND, ha="center",
-        va="top")
+arrow((ac[1], 3.55), (oc[0], 3.55), lw=0.8)
+ax.text(mid, 3.90, r"$\Delta z \leq -T$", fontsize=FS_EDGE, color=MUTED,
+        ha="center", va="center", **SANS)
+arrow((oc[0], 3.15), (ac[1], 3.15), color=ABSENT, ls=(0, (2.4, 1.6)), lw=0.8)
+for dx in (-1, 1):
+    ax.plot([mid - 0.10 * dx, mid + 0.10 * dx], [3.05, 3.25], lw=1.0,
+            color=ABSENT, zorder=6, solid_capstyle="round")
+ax.text(mid, 2.28, "removed by the\nascent guard", fontsize=FS_EDGE,
+        color=ABSENT, ha="center", va="center", linespacing=1.2, **SANS)
 
-# between the bands; labels staggered so the four do not collide
-for x, y, lbl, ha, down, top in (
-        (1.40, 4.88, r"$\Delta z \geq +T$",  "left",  True,  ac[3]),
-        (3.30, 4.45, "target reached",        "left",  False, ac[3]),
-        (6.20, 4.88, r"$\Delta z \leq -T$",  "right", True,  oc[3]),
-        (8.95, 4.45, "ascent complete",       "right", False, oc[3])):
-    arrow((x, 5.05), (x, top)) if down else arrow((x, top), (x, 5.05))
+# entries and exits; label side and row chosen so none crosses an arrow
+for x, y, lbl, col, up, ha in (
+        (1.70, 4.95, r"$\Delta z \geq +T$", MUTED, False, "right"),
+        (2.80, 4.65, "reached",             MUTED, True,  "left"),
+        (4.55, 4.95, r"$\Delta z \leq -T$", MUTED, False, "right"),
+        (5.90, 4.65, "reached",             MUTED, True,  "right"),
+        (6.50, 4.35, "latch holds",         LATCH, True,  "left")):
+    top = ac[3] if x < 4.0 else oc[3]
+    lw = 0.85 if col == LATCH else 0.7
+    arrow((x, top), (x, 5.30), col, lw=lw) if up else \
+        arrow((x, 5.30), (x, top), col, lw=lw)
     ax.text(x + (0.12 if ha == "left" else -0.12), y, lbl, fontsize=FS_EDGE,
-            color=INK2, ha=ha, va="center")
+            color=col, ha=ha, va="center", **SANS)
 
-# the sole terminus for forward progress
-node(7.50, 1.02, "surface hold")
-arrow((7.50, oc[2]), (7.50, boxes["surface hold"][3]))
-ax.text(7.50, 0.42, "target unreachable", fontsize=FS_NOTE, color=INK2,
-        ha="center", va="center", style="italic")
+# the sole terminus, reached only when the target cannot be attained
+arrow((oc[1], 3.40), (sh[0], 3.40), ls=(0, (2.0, 1.6)))
+
+# legend: three edge classes
+for x, col, ls, lbl in ((0.30, MUTED, "-", "transition"),
+                        (2.65, LATCH, "-", "latch-mediated"),
+                        (5.55, ABSENT, (0, (2.4, 1.6)), "absent by construction")):
+    arrow((x, 0.42), (x + 0.45, 0.42), col, ls=ls)
+    ax.text(x + 0.57, 0.42, lbl, fontsize=FS_EDGE, color=MUTED, ha="left",
+            va="center", **SANS)
 
 fig.savefig(OUT + ".pdf", bbox_inches="tight", pad_inches=0.01,
             metadata={"CreationDate": None})
-fig.savefig("/tmp/modegraph_preview.png", dpi=260, bbox_inches="tight",
+fig.savefig("/tmp/modegraph_preview.png", dpi=300, bbox_inches="tight",
             pad_inches=0.01)
 print("wrote", OUT + ".pdf")

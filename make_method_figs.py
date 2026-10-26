@@ -117,9 +117,9 @@ def draw(d, out, kind):
     fig, ax = plt.subplots(figsize=(3.45, 2.15))
     XE = np.append(xr - dx / 2, xr[-1] + dx / 2)
     ZE = np.append(z - dz / 2, z[-1] + dz / 2)
-    ax.pcolormesh(XE, ZE, np.ma.masked_where(~(g < 0.5 - 1e-9), g),
-                  cmap=matplotlib.colors.ListedColormap(["#e9e8e4"]),
-                  shading="flat", rasterized=True, zorder=0)
+    # Only occupied cells are drawn. Swept-free cells were shaded too, but
+    # the distinction only earns its ink where a column is unobserved, and
+    # neither selected frame has one.
     ax.pcolormesh(XE, ZE, np.ma.masked_where(~(g > 0.62), g), cmap="Greys",
                   vmin=0.55, vmax=1.05, shading="flat", rasterized=True,
                   zorder=2)

@@ -9,3 +9,6 @@ __pycache__/
 venv/
 .venv/
 
+
+# Overleaf clone (its own git repo, holds the push token)
+docs/paper/

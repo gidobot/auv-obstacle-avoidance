@@ -35,6 +35,10 @@ INK, INK2, GRID_INK, BASE_INK = "#0b0b0b", "#52514e", "#c9c8c3", "#9a9892"
 ASTAR, L, DS, B = 2.0, 2.0, 2.0, 1.0
 
 plt.rcParams.update({
+    # Type 42, not matplotlib's default Type 3: IEEE's PDF check
+    # rejects Type 3 outright.
+    "pdf.fonttype": 42,
+
     "font.family": "serif", "font.serif": ["DejaVu Serif"],
     "mathtext.fontset": "dejavuserif", "font.size": 7,
     "axes.labelsize": 7.5, "axes.linewidth": 0.5,

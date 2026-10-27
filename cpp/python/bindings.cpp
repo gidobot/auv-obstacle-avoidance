@@ -56,6 +56,12 @@ PYBIND11_MODULE(occupancy_map_cpp, m) {
     py::class_<OccupancyMapConfig>(m, "OccupancyMapConfig")
         .def(py::init<>())
         // Grid dimensions
+        .def_readwrite("enable_commitment",
+                       &OccupancyMapConfig::enable_commitment)
+        .def_readwrite("enable_tail_clearance",
+                       &OccupancyMapConfig::enable_tail_clearance)
+        .def_readwrite("enable_sequencing",
+                       &OccupancyMapConfig::enable_sequencing)
         .def_readwrite("dx",            &OccupancyMapConfig::dx)
         .def_readwrite("dz",            &OccupancyMapConfig::dz)
         .def_readwrite("horizon_fwd",   &OccupancyMapConfig::horizon_fwd)

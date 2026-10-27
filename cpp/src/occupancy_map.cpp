@@ -532,6 +532,16 @@ bool OccupancyMap::safety_tail_blocked(double vehicle_depth) const {
 
 void OccupancyMap::set_mode_from_cmd_depth(double vehicle_depth) {
     const auto& c = cfg_;
+
+    // Ablation: without sequencing there is no in-place vertical correction,
+    // so neither zero-surge mode is reachable and get_control() keeps
+    // commanding survey speed.  A latch, if one is held, still overrides this
+    // to OBSTACLE_HOLD in Step 2c, which also surges.
+    if (!c.enable_sequencing) {
+        control_mode_ = "ALT_FOLLOW";
+        return;
+    }
+
     double target_z = cmd_depth_[cx_];
 
     if (std::isnan(target_z)) {
@@ -683,6 +693,15 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
     cmd_depth_[cx_] = vcmd;
 
     // ----- Step 2a: release latch if past tracked obstacle + margin -----
+    // Ablation: with commitment disabled, release any latch held from before
+    // the switch so the run cannot carry one indefinitely.
+    if (!c.enable_commitment && cliff_top_committed_) {
+        cliff_top_committed_ = false;
+        cliff_top_target_z_  = kNaN;
+        cliff_top_target_x_  = kNaN;
+        cliff_top_release_x_ = kNaN;
+        cliff_top_commit_heading_ = kNaN;
+    }
     if (cliff_top_committed_ && vehicle_world_x >= cliff_top_release_x_) {
         cliff_top_committed_ = false;
         cliff_top_target_z_  = kNaN;
@@ -692,7 +711,9 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
     }
 
     // ----- Step 2b: forward-obstacle detection -----
-    auto obs = forward_obstacle(vehicle_depth, vehicle_world_x);
+    ObstacleResult obs{false, kNaN, kNaN};
+    if (c.enable_commitment)
+        obs = forward_obstacle(vehicle_depth, vehicle_world_x);
     if (obs.found) {
         // Deliberately not clamped to 0.  If peak_z - imaging_altitude is
         // negative the obstacle top is above the water surface, and the
@@ -802,7 +823,8 @@ void OccupancyMap::build_commanded_depth(double vehicle_depth) {
     // TAIL_CLEAR and OBSTACLE_HOLD both command survey speed, so alternating
     // between them changes no actuator output, and the 40.6 m total sits within
     // 0.6 m of the terrain's own 40.0 m approach-plus-tail-clearance budget.
-    bool tail_blocked = safety_tail_blocked(vehicle_depth);
+    bool tail_blocked = c.enable_tail_clearance
+                     && safety_tail_blocked(vehicle_depth);
 
     // Only the vehicle column matters for the flag: it is the one the planner
     // is trying to reach an altitude at.  Recorded before the cap, since the

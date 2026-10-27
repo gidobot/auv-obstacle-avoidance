@@ -211,6 +211,25 @@ struct OccupancyMapConfig {
     /// new heading where that space is actually clear.
     double stale_heading_threshold_deg = 45.0;
 
+    // --- Ablation switches -------------------------------------------------
+    // All default true, which is the full method.  Each removes exactly one
+    // mechanism and leaves the rest of the pipeline -- the grid, the
+    // manifold, the vehicle-column command, the message plumbing -- intact,
+    // so an ablation run differs from a full run only in the named mechanism.
+    //
+    /// Cliff-top latch: the committed target and the position-gated release,
+    /// and so the OBSTACLE_HOLD mode that carries it.  With this false the
+    /// controller never commits, and reacts only to what it currently sees.
+    bool enable_commitment     = true;
+    /// Descent cap behind a descending edge, and the TAIL_CLEAR mode.  Also
+    /// clears descent_blocked, which the local planner reads separately when
+    /// deciding whether a waypoint's depth has been satisfied.
+    bool enable_tail_clearance = true;
+    /// In-place vertical correction.  With this false neither zero-surge mode
+    /// can be entered, the supervisor only ever reports ALT_FOLLOW, and the
+    /// vehicle corrects its altitude while continuing to surge.
+    bool enable_sequencing     = true;
+
     // Safety clearance
     /// Minimum horizontal clearance behind the vehicle, from manifold geometry
     /// in the tail depth band, before descent is allowed.
